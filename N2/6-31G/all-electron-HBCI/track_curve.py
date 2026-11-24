@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 from forte2 import System
 from forte2.orbitals.orbital_overlap import mo_overlap
 
@@ -13,6 +14,7 @@ parent = root.parent / "all-electron-FCI"
 settings = json.loads((parent/"input.json").read_text())
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--epsilon", type=float, help="Use a common survey threshold instead of qualified roots")
+parser.add_argument("--buffer", action="store_true", help="Inspect the additional four-root singlet calculations")
 parser.add_argument("--output", type=Path, required=True)
 args = parser.parse_args()
 os.chdir(parent)  # use the archived nitrogen basis with a relative, lower-case name
@@ -55,7 +57,7 @@ def overlap(left,right,M):
 
 
 def roots_at(r,sector):
-    point=root/"full"/f"R-{r:.2f}"
+    point=root/("diagnostics" if args.buffer else "full")/f"R-{r:.2f}"
     eps=args.epsilon
     if eps is None:
         fit=point/(sector["label"]+"-fit.json")
@@ -73,19 +75,22 @@ distances=settings["distances_angstrom"]
 systems=[basis_at(r) for r in distances]
 rows=[]
 for i,(r0,r1) in enumerate(zip(distances,distances[1:])):
+    if args.buffer and (r0,r1) not in [(0.8,0.9),(1.05,1.1)]: continue
     a,ca=systems[i]; b,cb=systems[i+1]
     M=mo_overlap(ca,a,cb,b)
     for sector in settings["states"]:
         left,right=roots_at(r0,sector),roots_at(r1,sector)
         if left is None or right is None: continue
         x=np.array([[overlap(l,t,M) for t in right[1]] for l in left[1]])
-        best=[0,1] if x[0,0,0]+x[1,1,0]>=x[0,1,0]+x[1,0,0] else [1,0]
-        unique=all(x[k,best[k],1]>x[k,1-best[k],2] for k in range(2))
+        _,best=linear_sum_assignment(-x[:,:,0])
+        certified=[bool(x[k,j,1]>max(np.delete(x[k,:,2],j))) for k,j in enumerate(best)]
+        unique=all(certified)
         rows.append(dict(left_angstrom=r0,right_angstrom=r1,sector=sector["label"],
                          epsilon_left=left[0],epsilon_right=right[0],
                          overlap_magnitude_truncated=x[:,:,0].tolist(),
                          lower=x[:,:,1].tolist(),upper=x[:,:,2].tolist(),
-                         best_matching_right_ranks=[j+1 for j in best],
+                         best_matching_right_ranks=[int(j)+1 for j in best],
+                         row_match_certified=certified,
                          certified_within_root_pair=bool(unique)))
 result=dict(threshold_mode="qualified" if args.epsilon is None else "common survey threshold",
             neighboring_sector_pairs=len(rows),pairs=rows)
