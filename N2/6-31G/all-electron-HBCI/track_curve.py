@@ -16,6 +16,7 @@ parent = root.parent / "all-electron-FCI"
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--epsilon", type=float, help="Use a common survey threshold instead of qualified roots")
 parser.add_argument("--buffer", action="store_true", help="Inspect the additional four-root singlet calculations")
+parser.add_argument("--transport", action="store_true", help="Compare CI character in matching Löwdin-orthogonalized atom-centered AOs")
 parser.add_argument("--output", type=Path, required=True)
 args = parser.parse_args()
 os.chdir(parent)  # use the archived nitrogen basis with a relative, lower-case name
@@ -30,6 +31,13 @@ def basis_at(r):
     if not np.allclose(mo_overlap(C,system,C),np.eye(18),rtol=0,atol=1e-9):
         raise ValueError("Different AO convention from archived Hamiltonian")
     return system,C
+
+
+def lowdin_coefficients(C):
+    u,sigma,vt=np.linalg.svd(C,full_matrices=False)
+    if sigma[-1] < 1e-10:
+        raise ValueError("Singular MO coefficient matrix")
+    return u@vt
 
 
 def components(state, sector):
@@ -78,7 +86,12 @@ rows=[]
 for i,(r0,r1) in enumerate(zip(distances,distances[1:])):
     if args.buffer and (r0,r1) not in [(0.8,0.9),(1.05,1.1)]: continue
     a,ca=systems[i]; b,cb=systems[i+1]
-    M=mo_overlap(ca,a,cb,b)
+    if args.transport:
+        # For square C with Cᵀ S C = I, its orthogonal polar factor equals S^(1/2) C.
+        # Use the same atom and AO labels for the two Löwdin frames.
+        M=lowdin_coefficients(ca).T @ lowdin_coefficients(cb)
+    else:
+        M=mo_overlap(ca,a,cb,b)
     for sector in settings["states"]:
         left,right=roots_at(r0,sector),roots_at(r1,sector)
         if left is None or right is None: continue
@@ -95,6 +108,8 @@ for i,(r0,r1) in enumerate(zip(distances,distances[1:])):
                          certified_within_root_pair=bool(unique)))
 result=dict(threshold_mode="qualified" if args.epsilon is None else "common survey threshold",
             neighboring_sector_pairs=len(rows),pairs=rows)
+if args.transport:
+    result["orbital_metric"]="matching Löwdin-orthogonalized atom-centered AO labels"
 outfile=args.output if args.output.is_absolute() else root/args.output
 outfile.write_text(json.dumps(result,indent=2)+"\n")
 print("Neighbor pairs",len(rows),"certified within the two roots",
