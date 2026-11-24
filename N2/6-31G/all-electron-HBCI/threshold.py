@@ -1,6 +1,7 @@
 """Solve one variational threshold and converge deterministic EN-PT2 at fixed wavefunction."""
 import argparse
 import hashlib
+import fcntl
 import json
 from pathlib import Path
 import time
@@ -24,6 +25,12 @@ parser.add_argument("sector", choices=[s["label"] for s in options["states"]])
 parser.add_argument("epsilon", type=float)
 args = parser.parse_args()
 point = root / args.space / f"R-{args.r:.2f}"
+file = point / f"{args.sector}-{args.epsilon:.8g}.json"
+# A coarse grid survey can meet a refinement worker at the same threshold.
+lock = file.with_suffix(".lock").open("a")
+fcntl.flock(lock, fcntl.LOCK_EX)
+if file.exists():
+    raise SystemExit(0)
 archive = ((point if args.space == "calibration" else parent / point.name) / "hamiltonian.npz")
 target = next(s for s in options["states"] if s["label"] == args.sector)
 state = State(nel=14, multiplicity=target["multiplicity"], ms=target["ms"],
@@ -77,7 +84,6 @@ record = dict(space=args.space, distance_angstrom=args.r, sector=args.sector,
               pt2_screening_change_Eh=change, spin_squared=list(helper.compute_spin2()),
               sha256=hashlib.sha256(archive.read_bytes()).hexdigest(), seconds=time.monotonic()-t,
               dominant_coefficients=dominant)
-file = point / f"{args.sector}-{args.epsilon:.8g}.json"
 temp=file.with_suffix(".tmp")
 temp.write_text(json.dumps(record,allow_nan=False)+"\n")
 temp.replace(file)
