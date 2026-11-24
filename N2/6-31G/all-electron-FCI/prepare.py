@@ -12,7 +12,8 @@ here = Path(__file__).resolve().parent
 os.chdir(here)  # Forte2 normalizes basis names to lowercase, including any path prefix.
 options = json.loads((here / "input.json").read_text())
 distance = float(sys.argv[1])
-if distance not in options["distances_angstrom"]:
+additional = options.get("additional_hbci_distances_angstrom", [])
+if distance not in options["distances_angstrom"] + additional:
     raise ValueError("Distance outside the requested grid")
 point = here / f"R-{distance:.2f}"
 if (point / "results.json").exists():
@@ -48,7 +49,7 @@ record = {"distance_angstrom":distance,"rhf_total_energy_Eh":float(rhf.E),
           "nuclear_repulsion_Eh":float(ints.E),"rhf_reconstruction_error_Eh":float(energy_check-rhf.E),
           "coordinate_file":"geometry.xyz","integral_file":"hamiltonian.npz","orbitals":norb,
           "electrons":rhf.nel,"cholesky_tolerance":options["cholesky_tol"],
-          "fci_states":[],"fci_status":"pending"}
+          "fci_states":[],"fci_status":"not_requested" if distance in additional else "pending"}
 temp = point / "results.json.tmp"
 temp.write_text(json.dumps(record, indent=2, allow_nan=False) + "\n")
 temp.replace(point / "results.json")

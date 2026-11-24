@@ -4,6 +4,8 @@
 
 The curve covers 20 N–N distances between 0.80 and 2.50 Å. At each distance the target is the two lowest singlet roots in Ag and the two lowest triplet roots in B1u in D2h, with the bond on the z axis. The triplets use Ms = 1. Root numbers are one-based energy ranks within a spin and spatial symmetry sector at a single geometry. The dataset does not assign spectroscopic labels or establish continuity of wavefunction character at avoided crossings.
 
+The HBCI extension uses three additional Hamiltonians at 3.00, 3.50, and 4.00 Å, archived here with their RHF preparation outputs. The FCI calculation grid remains the original 20 distances.
+
 ## Hamiltonian and solver
 
 The nonrelativistic clamped-nuclei Hamiltonian correlates all 14 electrons in all 18 spatial orbitals. The nitrogen 6-31G basis contains only s and p functions. The integral preparation uses Forte2 Cholesky decomposition with a threshold of 1e-12, followed by transformation into symmetry-labeled canonical RHF orbitals. The RHF energy and density convergence tolerances are 1e-12 Eh and 1e-9, respectively.

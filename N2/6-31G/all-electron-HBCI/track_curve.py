@@ -9,9 +9,10 @@ from scipy.optimize import linear_sum_assignment
 from forte2 import System
 from forte2.orbitals.orbital_overlap import mo_overlap
 
+from grid import settings
+
 root = Path(__file__).resolve().parent
 parent = root.parent / "all-electron-FCI"
-settings = json.loads((parent/"input.json").read_text())
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--epsilon", type=float, help="Use a common survey threshold instead of qualified roots")
 parser.add_argument("--buffer", action="store_true", help="Inspect the additional four-root singlet calculations")

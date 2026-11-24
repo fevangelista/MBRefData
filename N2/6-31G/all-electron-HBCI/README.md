@@ -2,7 +2,7 @@
 
 [Full-basis results](results.json) · [Exact controls and threshold calibration](calibration/) · [Geometry grid, state definitions and integral options](../all-electron-FCI/input.json)
 
-The targets are the two lowest singlet Ag roots and two lowest triplet B1u roots in D2h at each of the 20 bond lengths from 0.80 to 2.50 Å. Root labels denote energy order within a sector at each geometry. The production runs read the same 18-orbital, 14-electron Hamiltonians as the [FCI dataset](../all-electron-FCI/README.md). All total energies include nuclear repulsion. The integral Cholesky threshold is 1e-12.
+The targets are the two lowest singlet Ag roots and two lowest triplet B1u roots in D2h at each of the 23 bond lengths from 0.80 to 4.00 Å. Root labels denote energy order within a sector at each geometry. The production runs read the same 18-orbital, 14-electron Hamiltonians as the [FCI dataset](../all-electron-FCI/README.md). All total energies include nuclear repulsion. The integral Cholesky threshold is 1e-12.
 
 ## Calibration and acceptance
 
@@ -16,7 +16,7 @@ The reported estimate is the intercept of a linear fit of four variational energ
 
 ## Program and reproduction
 
-Forte2 2026.11.2, upstream commit 8378e93380939a6c93ad1d647f6087845a8ff850, runs on spark-66ea in the forte2 environment. The exact-control inputs are in calibrate_fci.py. The HBCI and PT2 options are in threshold.py. The threshold sequence and acceptance rules are in campaign.py. Four calibration sectors can run independently using four Forte2 threads and one OpenBLAS thread per sector.
+The original 20 geometries use Forte2 2026.11.2 at upstream commit 8378e93380939a6c93ad1d647f6087845a8ff850 on spark-66ea. The 3.00, 3.50, and 4.00 Å extension uses a fresh build of origin/main at 692ae30049bebc71d5f1c4dc01f8bbbce596d751 on spark-6ad0, with Python 3.12.13, NumPy 2.4.4, and SciPy 1.17.1. The single intervening commit changes the Knowles–Handy FCI sigma builder and its symmetry test. Both N₂ FCI symmetry test cases and the multiroot N₂ selected-CI regression passed on the second machine. The exact-control inputs are in calibrate_fci.py. The HBCI and PT2 options are in threshold.py. The threshold sequence and acceptance rules are in campaign.py. Four calibration sectors can run independently using four Forte2 threads and one OpenBLAS thread per sector.
 
 From this directory run the following in the Forte2 environment. Raw calculation logs are preserved alongside the corresponding machine-readable data.
 
@@ -36,6 +36,6 @@ The results index counts only roots passing the protocol. Per-distance results a
 
 The [neighboring-geometry overlap survey](survey-tracking.json) compares the two roots in each sector between successive geometries using their wavefunctions at the common variational threshold of 0.001. The overlap includes the cross-geometry AO overlap and both MO coefficient matrices. The retained contribution uses up to 128 leading determinants per root, with separate alpha- and beta-spin determinant overlaps. The lower and upper bounds include the omitted coefficient norms and the known projections onto the opposite retained determinant space. The bounds concern these HBCI wavefunctions at the stated threshold.
 
-The survey resolves 36 of 38 neighboring two-root assignments within the computed pairs. The singlet Ag assignments at 0.80–0.90 Å and 1.05–1.10 Å are ambiguous, driven by very small rank-2 overlaps with either state at the next geometry. Preserve energy rank at each distance and inspect higher roots if a continuous character assignment across those intervals is needed. For a comparison using only qualified calculations, run `python track_curve.py --output qualified-tracking.json` in the Forte2 environment. The survey can be reproduced by adding `--epsilon 0.001`.
+On the original 20-point grid, the survey resolves 36 of 38 neighboring two-root assignments within the computed pairs. The singlet Ag assignments at 0.80–0.90 Å and 1.05–1.10 Å are ambiguous, driven by very small rank-2 overlaps with either state at the next geometry. Preserve energy rank at each distance and inspect higher roots if a continuous character assignment across those intervals is needed. For a comparison using only qualified calculations, run `python track_curve.py --output qualified-tracking.json` in the Forte2 environment. The survey can be reproduced by adding `--epsilon 0.001`.
 
 A [four-root diagnostic](diagnostics/README.md) resolves the rank-2 to rank-3 character change between 1.05 and 1.10 Å and identifies a rank-4 to rank-2 match between 0.80 and 0.90 Å.

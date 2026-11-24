@@ -2,9 +2,10 @@
 import json
 from pathlib import Path
 
+from grid import settings
+
 root = Path(__file__).resolve().parent
 parent = root.parent / "all-electron-FCI"
-settings = json.loads((parent/"input.json").read_text())
 sectors = [s["label"] for s in settings["states"]]
 
 def load(path):

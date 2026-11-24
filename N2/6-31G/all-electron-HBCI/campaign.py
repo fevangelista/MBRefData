@@ -8,9 +8,10 @@ import subprocess
 import sys
 import numpy as np
 
+from grid import settings
+
 root = Path(__file__).resolve().parent
 parent = root.parent / "all-electron-FCI"
-settings = json.loads((parent / "input.json").read_text())
 sectors = [s["label"] for s in settings["states"]]
 anchors = [1.10, 2.10]
 epsilons = [0.002 * 0.5**i for i in range(15)]

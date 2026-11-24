@@ -15,9 +15,10 @@ from forte2.lib.det import Determinant, hilbert_space
 from forte2.sci.sci import _SelectedCISingleStateSolver
 from types import SimpleNamespace
 
+from grid import settings as options
+
 root = Path(__file__).resolve().parent
 parent = root.parent / "all-electron-FCI"
-options = json.loads((parent / "input.json").read_text())
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("space", choices=["calibration", "full"])
 parser.add_argument("r", type=float, choices=options["distances_angstrom"])
