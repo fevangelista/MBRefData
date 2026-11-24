@@ -25,6 +25,14 @@ for space in ["calibration","full"]:
         point = base/f"R-{r:.2f}"
         point.mkdir(exist_ok=True)
         states, trials = [], {}
+        rank_check = {}
+        check_file = root/"diagnostics"/point.name/"results.json"
+        if space=="full" and check_file.exists():
+            check = load(check_file)
+            if "rank_confirmed" in check:
+                rank_check = {"sector":check["sector"], "rank":check["rank"],
+                              "rank_confirmed":check["rank_confirmed"],
+                              "file":f"../../diagnostics/{point.name}/results.json"}
         for sector in sectors:
             levels = [load(p) for p in point.glob(sector+"-*.json") if not p.name.endswith("-fit.json")]
             levels.sort(key=lambda q:-q["epsilon_var"])
@@ -38,11 +46,15 @@ for space in ["calibration","full"]:
                     assert len(fit["fits"]) == 2
                     for s in fit["fits"]:
                         assert s["diagnostics_pass"] and s["estimated_uncertainty_Eh"]<=1e-6
+                        if rank_check and (sector,s["rank"]) == (rank_check["sector"],rank_check["rank"]) and not rank_check["rank_confirmed"]:
+                            continue
                         states.append(dict(sector=sector,epsilon_var=fit["epsilon_var"],**s))
         status = "qualified" if len(states)==4 else "partial" if states else "in_progress" if any(trials.values()) else "pending"
         result=dict(distance_angstrom=r,space=space,status=status,
                     exact_control=load(point/"exact.json") if (point/"exact.json").exists() else None,
                     qualified_states=states, threshold_measurements=trials)
+        if rank_check:
+            result["independent_rank_check"]=rank_check
         write(point/"results.json",result)
         curve.append(dict(distance_angstrom=r,status=status,file=f"{point.name}/results.json",
                           qualified_states=states))

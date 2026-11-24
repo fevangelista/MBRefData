@@ -8,3 +8,5 @@ At each endpoint of the two ambiguous intervals we targeted the four lowest sing
 [Overlap matrices, bounds and individual row confidence](results.json) · [Methods](../README.md)
 
 To reproduce a calculation, run `python threshold.py full 1.05 singlet-Ag 0.001 --buffer-roots 4` from the dataset directory. After all four points are available, run `python track_curve.py --buffer --epsilon 0.001 --output diagnostics/results.json`.
+
+A separate [four-root check at 4.00 Å](R-4.00/README.md) tests the rank of the second full-basis singlet at the dissociation end of the curve.
