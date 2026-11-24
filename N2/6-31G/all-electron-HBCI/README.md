@@ -31,3 +31,9 @@ python summarize.py
 ```
 
 The results index counts only roots passing the protocol. Per-distance results also include intermediate energies at completed thresholds so the convergence can be inspected.
+
+## Following states along the curve
+
+The [neighboring-geometry overlap survey](survey-tracking.json) compares the two roots in each sector between successive geometries using their wavefunctions at the common variational threshold of 0.001. The overlap includes the cross-geometry AO overlap and both MO coefficient matrices. The retained contribution uses up to 128 leading determinants per root, with separate alpha- and beta-spin determinant overlaps. The lower and upper bounds include the omitted coefficient norms and the known projections onto the opposite retained determinant space. The bounds concern these HBCI wavefunctions at the stated threshold.
+
+The survey resolves 36 of 38 neighboring two-root assignments within the computed pairs. The singlet Ag assignments at 0.80–0.90 Å and 1.05–1.10 Å are ambiguous, driven by very small rank-2 overlaps with either state at the next geometry. Preserve energy rank at each distance and inspect higher roots if a continuous character assignment across those intervals is needed. For a comparison using only qualified calculations, run `python track_curve.py --output qualified-tracking.json` in the Forte2 environment. The survey can be reproduced by adding `--epsilon 0.001`.
