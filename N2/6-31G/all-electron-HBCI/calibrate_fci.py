@@ -1,7 +1,7 @@
 """Build the [3s1p] nitrogen subset and diagonalize both spin sectors exactly."""
+import argparse
 import json
 import os
-import sys
 from pathlib import Path
 import numpy as np
 from forte2 import CISolver, RHF, State, System
@@ -11,9 +11,17 @@ from forte2.jkbuilder.mointegrals import RestrictedMOIntegrals
 root = Path(__file__).resolve().parent
 parent = root.parent / "all-electron-FCI"
 options = json.loads((parent / "input.json").read_text())
-r = float(sys.argv[1])
-assert r in (1.1, 2.1)
-point = root / "calibration" / f"R-{r:.2f}"
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("distance", type=float)
+parser.add_argument("--validation", action="store_true", help="Generate an independent control outside the calibration fit")
+args = parser.parse_args()
+r = args.distance
+allowed = [1.1, 2.1]
+if args.validation:
+    allowed = options["distances_angstrom"] + options.get("additional_hbci_distances_angstrom", [])
+if r not in allowed:
+    parser.error("Distance is outside the requested control grid")
+point = root / ("validation" if args.validation else "calibration") / f"R-{r:.2f}"
 point.mkdir(exist_ok=True, parents=True)
 os.chdir(point)
 basis = json.loads((parent / options["basis_file"]).read_text())

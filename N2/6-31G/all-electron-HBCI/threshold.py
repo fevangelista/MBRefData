@@ -20,7 +20,7 @@ from grid import settings as options
 root = Path(__file__).resolve().parent
 parent = root.parent / "all-electron-FCI"
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("space", choices=["calibration", "full"])
+parser.add_argument("space", choices=["calibration", "validation", "full"])
 parser.add_argument("r", type=float, choices=options["distances_angstrom"])
 parser.add_argument("sector", choices=[s["label"] for s in options["states"]])
 parser.add_argument("epsilon", type=float)
@@ -36,7 +36,7 @@ lock = file.with_suffix(".lock").open("a")
 fcntl.flock(lock, fcntl.LOCK_EX)
 if file.exists():
     raise SystemExit(0)
-archive = ((point if args.space == "calibration" else parent / point.name) / "hamiltonian.npz")
+archive = (parent / point.name if args.space == "full" else point) / "hamiltonian.npz"
 target = next(s for s in options["states"] if s["label"] == args.sector)
 state = State(nel=14, multiplicity=target["multiplicity"], ms=target["ms"],
               symmetry=target["irrep_index"], symmetry_label=target["irrep"])
