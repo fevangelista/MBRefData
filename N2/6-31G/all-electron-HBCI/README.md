@@ -4,6 +4,12 @@
 
 The targets are the two lowest singlet Ag roots and two lowest triplet B1u roots in D2h at each of the 23 bond lengths from 0.80 to 4.00 Å. Root labels denote energy order within a sector at each geometry. The production runs read the same 18-orbital, 14-electron Hamiltonians as the [FCI dataset](../all-electron-FCI/README.md). All total energies include nuclear repulsion. The integral Cholesky threshold is 1e-12.
 
+## Live job console
+
+On the Mac, double-click [monitor.command](monitor.command) or run `python3 monitor.py` from this directory. The console reads both Sparks over SSH every 30 seconds. It shows all 23 geometries, active selection thresholds, per-root uncertainties in µEh, and qualification against the current target. A question mark marks an excited-state assignment awaiting an independent rank check. Arrow keys select a geometry, Enter expands its solver and log details, **a** filters to active geometries, **r** refreshes, and **q** quits. The monitor reads job data without sending signals to the solvers.
+
+Use `python3 monitor.py --once` for a plain-text snapshot or `python3 monitor.py --published --once` for the local checkout without SSH. If a host goes offline, its row identifies the data being shown as cached. Live mode uses the existing `spark-66ea` and `spark-6ad0` SSH aliases.
+
 ## Calibration and acceptance
 
 At 1.10 and 2.10 Å we remove only the outer p contraction of nitrogen 6-31G, retaining all three s contractions and the inner p shell on each atom. This gives 12 spatial orbitals. Both N 1s orbitals remain in the correlation space. The original exact controls have directly verified residuals below 5e-8 Eh. For the tighter campaign, precision_fci.py requests 1e-9 Eh residuals on the same archived integrals.
