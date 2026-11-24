@@ -21,9 +21,19 @@ for block in sorted(blocks, key=lambda block: block["sector"]):
     sector = block["sector"]
     for fit in block["fits"]:
         i = fit["rank"] - 1
+        filename = sector+"-fit.json"
+        selected_threshold = block["epsilon_var"]
+        if i==1 and sector=="triplet-B1u":
+            buffered_file=point/"buffered/triplet-rank-check.json"
+            if buffered_file.exists():
+                buffered=json.loads(buffered_file.read_text())
+                if buffered["rank_confirmed"] and buffered.get("target_Eh")==target:
+                    fit=buffered["fits"][i]
+                    filename="buffered/triplet-rank-check.json"
+                    selected_threshold=buffered["epsilon_var"]
         energy = exact[sector]["E_FCI_Eh"][i]
         deviation = fit["extrapolated_total_Eh"] - energy
-        states.append(dict(sector=sector, rank=i+1, epsilon_var=block["epsilon_var"],
+        states.append(dict(sector=sector, rank=i+1, epsilon_var=selected_threshold, source=filename,
                            E_FCI_Eh=energy, FCI_residual_Eh=exact[sector]["residual_Eh"][i],
                            extrapolated_total_Eh=fit["extrapolated_total_Eh"],
                            estimated_uncertainty_Eh=fit["estimated_uncertainty_Eh"],

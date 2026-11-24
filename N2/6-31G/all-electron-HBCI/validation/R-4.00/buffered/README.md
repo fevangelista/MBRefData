@@ -1,0 +1,3 @@
+# Four-root 4.00 Å reduced-basis triplet check
+
+The two-root fit followed the third exact triplet at this distance. Four-root HBCI resolves the second triplet at a selection threshold of 3.90625e-6. Its fit uncertainty is 0.0555 µEh. The measured error is 0.00116 µEh for the [exact control Hamiltonian](../hamiltonian.npz). The [rank check and fitted energies](triplet-rank-check.json) include the threshold list, same-root overlap checks against the other roots, and empirical spectral interval test. Each raw threshold result has a matching .out file. Run `python diagnostics/check_endpoint.py --validation --triplet` from the HBCI dataset directory to reproduce the checks.

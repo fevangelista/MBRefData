@@ -52,4 +52,4 @@ The extended survey contains 44 adjacent geometry/sector comparisons. On the 0.5
 
 In the atom-centered comparison, all six extended geometry/sector pairs favor rank 1 → 1 and rank 2 → 2 with separated bounds. The weakest retained same-rank overlap is 0.472 for the second triplet between 3.50 and 4.00 Å. These assignments compare the two calculated roots within each sector. The direct physical overlaps remain in the original survey file.
 
-The [full-basis endpoint check](diagnostics/R-4.00/) tests the ordering of the second singlet at 4.00 Å with four independently selected roots. Its rank confirmation is required for inclusion of that excited singlet in the reference index.
+The [full-basis endpoint check](diagnostics/R-4.00/) tests the ordering of the second singlet at 4.00 Å with four independently selected roots. Independent four-root rank confirmations are required for both the second singlet and second triplet at 4.00 Å. In the reduced-basis validation, four-root selection resolved a 0.314804 µEh triplet splitting and recovered the second root to 0.00116 µEh.

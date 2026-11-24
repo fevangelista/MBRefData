@@ -1,4 +1,4 @@
-# Full-basis excited singlets at 4.00 Å
+# Full-basis excited states at 4.00 Å
 
 The independent [12-orbital spectrum](../../validation/R-4.00/singlet-spectrum.json) identified three closely spaced excited singlets. This four-root diagnostic checks the ordering in the full 18-orbital 6-31G reference.
 
@@ -9,3 +9,5 @@ The Hamiltonian and basis are the same as for the [two-root production calculati
 ```sh
 OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=1 python -u threshold.py full 4.0 singlet-Ag 0.0005 --buffer-roots 4
 ```
+
+For the second triplet, the [reduced-basis four-root control](../../validation/R-4.00/buffered/) detected a 0.314804 µEh spacing to rank 3. The [full-basis triplet verification](triplet-rank-check.json) applies the same rank and precision checks. Reproduce it with `python diagnostics/check_endpoint.py --triplet`.

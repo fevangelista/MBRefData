@@ -6,7 +6,7 @@ The HBCI stopping rule uses only energies, PT2 screening convergence, spin expec
 
 ### Current 0.1 µEh check
 
-The first application of the tighter protocol passed for three of four states. The second triplet's estimated uncertainty was 0.0469 µEh at a selection threshold of 3.90625e-6. Its error against the tightened exact calculation was 0.3159 µEh. Three extra threshold halvings reduced the estimate to 0.0145 µEh with a measured error of 0.3149 µEh. The [first comparison](R-4.00/first-strict-check.json) preserves this failure. Additional triplet roots are being checked to resolve the ordering. The root-specific statuses remain available in [results.json](results.json).
+The first application of the tighter protocol passed for three of four states. The second triplet's estimated uncertainty was 0.0469 µEh at a selection threshold of 3.90625e-6. Its error against the tightened exact calculation was 0.3159 µEh. Three extra threshold halvings reduced the estimate to 0.0145 µEh with a measured error of 0.3149 µEh. The [first comparison](R-4.00/first-strict-check.json) preserves this failure. The [four-triplet exact spectrum](R-4.00/triplet-spectrum.json) resolves ranks 2 and 3 with a gap of 0.314804 µEh. The two-root HBCI calculation followed rank 3. A [four-root HBCI calculation](R-4.00/buffered/) resolves rank 2 at a selection threshold of 3.90625e-6. Its fit estimates 0.0555 µEh uncertainty and differs from exact rank 2 by 0.00116 µEh. With this assignment all four endpoint controls pass the 0.1 µEh target. The [results](results.json) identify the fit used for each state.
 
 ### Previous 1 µEh check
 
@@ -20,6 +20,9 @@ From the HBCI dataset directory, use the Forte2 environment and run
 export OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=1
 mkdir -p validation/R-4.00
 python -u calibrate_fci.py 4.00 --validation > validation/R-4.00/fci.out 2>&1
-python -u validation/check.py > validation/R-4.00/comparison.out 2>&1
+python -u precision_fci.py validation 4.00 > validation/R-4.00/fci-tight.out 2>&1
+python -u diagnostics/check_endpoint.py --triplet --validation
+python -u validation/check.py > validation/R-4.00/comparison-buffered.out 2>&1
 python -u validation/singlet_spectrum.py > validation/R-4.00/singlet-spectrum.out 2>&1
+python -u validation/singlet_spectrum.py --triplet > validation/R-4.00/triplet-spectrum.out 2>&1
 ```
