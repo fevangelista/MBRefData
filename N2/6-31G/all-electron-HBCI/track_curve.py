@@ -69,14 +69,21 @@ def roots_at(r,sector):
     point=root/("diagnostics" if args.buffer else "full")/f"R-{r:.2f}"
     eps=args.epsilon
     if eps is None:
-        fit=point/(sector["label"]+"-fit.json")
-        if not fit.exists(): return None
-        block=json.loads(fit.read_text())
-        if not block["qualified"] or block.get("target_Eh")!=target: return None
-        eps=block["epsilon_var"]
+        index=point/"results.json"
+        if not index.exists(): return None
+        needed=sorted((s for s in json.loads(index.read_text())["qualified_states"]
+                       if s["sector"]==sector["label"]),key=lambda s:s["rank"])
+        if len(needed)!=2: return None
+        thresholds,coeffs=[],[]
+        for state in needed:
+            fit=(point/state["source"]) if "source" in state else point/(sector["label"]+"-fit.json")
+            data=json.loads(fit.read_text())
+            if data.get("target_Eh")!=target: return None
+            raw=json.loads((fit.parent/data["threshold_files"][-1]).read_text())
+            thresholds.append(raw["epsilon_var"])
+            coeffs.append(components(raw["dominant_coefficients"][state["rank"]-1],sector))
+        return thresholds[0] if thresholds[0]==thresholds[1] else thresholds,coeffs
     f=point/f"{sector['label']}-{eps:.8g}.json"
-    if args.epsilon is None and block.get("threshold_files"):
-        f=point/block["threshold_files"][-1]
     if not f.exists(): return None
     coeff=json.loads(f.read_text())["dominant_coefficients"]
     return eps,[components(c,sector) for c in coeff]

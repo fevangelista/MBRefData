@@ -20,8 +20,10 @@ def write(file, obj):
     tmp.write_text(json.dumps(obj, indent=2, allow_nan=False)+"\n")
     tmp.replace(file)
 
-def solve(space, r, sector, epsilon, strict=False):
+def solve(space, r, sector, epsilon, strict=False, buffer_roots=None):
     point = root / space / f"R-{r:.2f}"
+    if buffer_roots:
+        point = root/"diagnostics"/point.name if space=="full" else point/"buffered"
     point.mkdir(parents=True, exist_ok=True)
     stem = f"{sector}-{epsilon:.8g}"
     base = point / (stem+".json")
@@ -34,6 +36,8 @@ def solve(space, r, sector, epsilon, strict=False):
 
     def run(file, flags):
         cmd = [sys.executable, "-u", str(root/"threshold.py"), space, str(r), sector, str(epsilon), *flags]
+        if buffer_roots:
+            cmd.extend(["--buffer-roots",str(buffer_roots)])
         with file.with_suffix(".out").open("a") as out:
             subprocess.run(cmd, cwd=root, stdout=out, stderr=subprocess.STDOUT, check=True)
 
@@ -61,7 +65,7 @@ def fits(records, sector, level):
     p = np.array([q["pt2_history"][-1]["pt2_Eh"] for q in rows])
     s2 = 0 if sector==sectors[0] else 2
     estimates = []
-    for i in range(2):
+    for i in range(e.shape[1]):
         def intercept(x, y):
             if np.ptp(x) < 1e-14:
                 return float(y[-1]+x[-1])
@@ -77,7 +81,8 @@ def fits(records, sector, level):
             c = a["dominant_coefficients"][i]
             cs = b["dominant_coefficients"]
             low = match_bounds(c,cs[i])[0]
-            matched &= low>0.5 and low>match_bounds(c,cs[1-i])[1]
+            competing=max(match_bounds(c,other)[1] for j,other in enumerate(cs) if j!=i)
+            matched &= low>0.5 and low>competing
         estimates.append(dict(rank=i+1, extrapolated_total_Eh=now,
             last_variational_Eh=float(e[-1,i]),last_PT2_Eh=float(p[-1,i]),
             fit_stability_Eh=stable, pt2_screening_change_Eh=screening, estimated_uncertainty_Eh=err,

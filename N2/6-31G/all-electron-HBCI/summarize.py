@@ -25,14 +25,15 @@ for space in ["calibration","full"]:
         point = base/f"R-{r:.2f}"
         point.mkdir(exist_ok=True)
         states, trials = [], {}
-        rank_check = {}
-        check_file = root/"diagnostics"/point.name/"results.json"
-        if space=="full" and check_file.exists():
-            check = load(check_file)
-            if "rank_confirmed" in check:
-                rank_check = {"sector":check["sector"], "rank":check["rank"],
-                              "rank_confirmed":check["rank_confirmed"],
-                              "file":f"../../diagnostics/{point.name}/results.json"}
+        rank_checks = {}
+        if space=="full":
+            diagnostic=root/"diagnostics"/point.name
+            for name in ["results.json","triplet-rank-check.json"]:
+                file=diagnostic/name
+                if file.exists():
+                    check=load(file)
+                    if "rank_confirmed" in check:
+                        rank_checks[(check["sector"],check["rank"])]=(check,f"../../diagnostics/{point.name}/{name}")
         for sector in sectors:
             measurements = {}
             for file in sorted(point.glob(sector+"-*.json"),key=lambda f:f.stem.endswith("-pt2")):
@@ -53,15 +54,23 @@ for space in ["calibration","full"]:
                     assert len(fit["fits"]) == 2
                     for s in fit["fits"]:
                         assert s["diagnostics_pass"] and s["estimated_uncertainty_Eh"]<=target and s["pt2_screening_change_Eh"]<=screening_target
-                        if rank_check and (sector,s["rank"]) == (rank_check["sector"],rank_check["rank"]) and not rank_check["rank_confirmed"]:
-                            continue
+                        if (sector,s["rank"]) in rank_checks:
+                            continue  # The four-root comparison supplies this reference after resolving its rank.
                         states.append(dict(sector=sector,epsilon_var=fit["epsilon_var"],**s))
+        for (sector,rank),(check,source) in rank_checks.items():
+            if check["rank_confirmed"] and check.get("target_Eh")==target:
+                state=check["fits"][rank-1]
+                assert state["diagnostics_pass"] and state["estimated_uncertainty_Eh"]<=target
+                states.append(dict(sector=sector,epsilon_var=check["epsilon_var"],source=source,**state))
+        states.sort(key=lambda state:(state["sector"],state["rank"]))
         status = "qualified" if len(states)==4 else "partial" if states else "in_progress" if any(trials.values()) else "pending"
         result=dict(distance_angstrom=r,space=space,status=status,target_per_root_Eh=target,
                     exact_control=load(point/"exact-tight.json") if (point/"exact-tight.json").exists() else load(point/"exact.json") if (point/"exact.json").exists() else None,
                     qualified_states=states, threshold_measurements=trials)
-        if rank_check:
-            result["independent_rank_check"]=rank_check
+        if rank_checks:
+            result["independent_rank_checks"]=[dict(sector=sector,rank=rank,file=source,
+                rank_confirmed=bool(check["rank_confirmed"] and check.get("target_Eh")==target))
+                for (sector,rank),(check,source) in rank_checks.items()]
         write(point/"results.json",result)
         curve.append(dict(distance_angstrom=r,status=status,file=f"{point.name}/results.json",
                           qualified_states=states))

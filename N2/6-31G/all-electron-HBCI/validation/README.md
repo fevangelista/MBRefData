@@ -4,6 +4,12 @@ This stretched geometry tests the threshold protocol calibrated at 1.10 and 2.10
 
 The HBCI stopping rule uses only energies, PT2 screening convergence, spin expectations, and root-overlap bounds from the threshold sequence. The [comparison script](check.py) reads the independent exact energies after applying this rule. The [results](results.json) report signed errors (HBCI extrapolation minus exact FCI) and estimated uncertainties in hartree.
 
+### Current 0.1 µEh check
+
+The first application of the tighter protocol passed for three of four states. The second triplet's estimated uncertainty was 0.0469 µEh at a selection threshold of 3.90625e-6. Its error against the tightened exact calculation was 0.3159 µEh. Three extra threshold halvings reduced the estimate to 0.0145 µEh with a measured error of 0.3149 µEh. The [first comparison](R-4.00/first-strict-check.json) preserves this failure. Additional triplet roots are being checked to resolve the ordering. The root-specific statuses remain available in [results.json](results.json).
+
+### Previous 1 µEh check
+
 Under the previous 1 µEh stopping rule, all four errors were below 1 µEh. The second triplet has the largest observed error, 0.317 µEh, against a fit-based estimate of 0.093 µEh. Thus the fit uncertainty can underestimate the error even when the reference meets the 1 µEh target. In that run the triplets qualified at a selection threshold of 1.5625e-5. Consecutive overlap checks for the second singlet required refinement to 1.220703125e-7.
 
 A [four-singlet exact calculation](R-4.00/singlet-spectrum.json) places roots 2 and 3 only 0.929 µEh apart and roots 3 and 4 a further 1.050 µEh apart. The largest verified residual among these four eigenpairs is below 0.000026 µEh. Several coarser HBCI threshold steps switch excited-state character in this narrow spacing. The reported singlet energies pass the consecutive-overlap criterion at the final threshold.

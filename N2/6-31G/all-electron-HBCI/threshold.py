@@ -29,7 +29,9 @@ parser.add_argument("--buffer-roots", type=int, choices=[3, 4, 5],
                     help="Run a separate wide-guess diagnostic with extra roots")
 args = parser.parse_args()
 point = root / args.space / f"R-{args.r:.2f}"
-out_dir = root/"diagnostics"/point.name if args.buffer_roots else point
+out_dir = point
+if args.buffer_roots:
+    out_dir = root/"diagnostics"/point.name if args.space=="full" else point/"buffered"
 out_dir.mkdir(exist_ok=True, parents=True)
 suffix = "-pt2" if args.tight_pt2_copy else ""
 file = out_dir / f"{args.sector}-{args.epsilon:.8g}{suffix}.json"

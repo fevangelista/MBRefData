@@ -2,6 +2,17 @@
 
 The two distance folders contain the [3s1p] nitrogen basis, MO Hamiltonian, exact FCI output, raw HBCI threshold calculations and extrapolation errors. All 14 electrons are active. Removing the outer p shell from each atom leaves 12 spatial orbitals. The [protocol JSON](results.json) records the criteria transferred to production.
 
+### Current 0.1 µEh calibration
+
+| R (Å) | Sector | Final selection threshold | Root 1 error (µEh) | Root 2 error (µEh) |
+|---:|---|---:|---:|---:|
+| 1.10 | singlet-Ag | 3.90625e-06 | +0.0046 | +0.0033 |
+| 1.10 | triplet-B1u | 7.8125e-06 | +0.0025 | +0.0035 |
+| 2.10 | singlet-Ag | 7.8125e-06 | -0.0018 | -0.0011 |
+| 2.10 | triplet-B1u | 7.8125e-06 | +0.0011 | +0.0017 |
+
+All eight exact residuals are below 0.001 µEh. The largest absolute extrapolation error plus its exact residual is 0.00463 µEh. The first eligible full-basis variational threshold is 3.90625e-6. Each fit records the individual threshold files, PT2 screening changes, uncertainties, and directly verified exact residuals. The files ending in -pt2 retain the stricter perturbative recalculations alongside the original datasets.
+
 ### Previous 1 µEh calibration
 
 | R (Å) | Sector | Tightest selection threshold used | Root 1 error (µEh) | Root 2 error (µEh) |
