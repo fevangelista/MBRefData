@@ -3,6 +3,7 @@ import argparse
 import hashlib
 import fcntl
 import json
+from math import comb
 from pathlib import Path
 import time
 
@@ -11,7 +12,6 @@ from forte2 import MOSpace, State
 from forte2.base_classes import DavidsonLiuParams, SelectedCIParams
 from forte2.helpers import logger
 from forte2.lib.det import hilbert_space
-from forte2.lib.ci_helpers import SelectedCIHelper
 from forte2.sci.sci import _SelectedCISingleStateSolver
 from types import SimpleNamespace
 
@@ -39,9 +39,15 @@ with np.load(archive) as a:
     irreps = a["orbital_irreps"].astype(int)
     ints = SimpleNamespace(E=float(a["scalar_Eh"]), H=a["h"], V=a["V"])
 pair = irreps[:, None] ^ irreps[None, :]
-for integrals, forbidden in [(ints.H, pair!=0), (ints.V, pair[:,:,None,None]!=pair[None,None,:,:])]:
-    assert np.max(np.abs(integrals[forbidden])) < 1e-10
+# Forbidden operators have zero matrix elements inside a single target irrep.
+# The Frobenius bound also limits the effect if one compares the entire operator.
+forbidden_bound = 0.0
+for integrals, forbidden, count in [(ints.H, pair != 0, 14),
+        (ints.V, pair[:, :, None, None] != pair[None, None, :, :], comb(14, 2))]:
+    forbidden_bound += count * np.linalg.norm(integrals[forbidden])
     integrals[forbidden] = 0.0
+if forbidden_bound >= 1e-6:
+    raise ValueError(f"Inspect symmetry labels: discarded-operator bound {forbidden_bound} Eh")
 norb = len(irreps)
 # Start from determinants of the requested irrep, including single and double excitations.
 # The guess restriction is lifted during heat-bath selection.
@@ -79,7 +85,7 @@ for c in solver.evecs.T:
     idx = np.argsort(abs(c))[-128:]
     dominant.append({solver.dets[int(i)].str(norb):float(c[i]) for i in idx})
 record = dict(space=args.space, distance_angstrom=args.r, sector=args.sector,
-              epsilon_var=args.epsilon, ndet=helper.ndets(), E_var_Eh=energies.tolist(),
+              forbidden_operator_bound_Eh=float(forbidden_bound), epsilon_var=args.epsilon, ndet=helper.ndets(), E_var_Eh=energies.tolist(),
               E_var_plus_PT2_Eh=(energies+correction).tolist(), pt2_history=pt2_history,
               pt2_screening_change_Eh=change, spin_squared=list(helper.compute_spin2()),
               sha256=hashlib.sha256(archive.read_bytes()).hexdigest(), seconds=time.monotonic()-t,
