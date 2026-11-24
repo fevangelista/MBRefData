@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 
-from grid import settings
+from grid import settings, target, screening_target, uncertainty_multiplier
 
 root = Path(__file__).resolve().parent
 parent = root.parent / "all-electron-FCI"
@@ -34,24 +34,31 @@ for space in ["calibration","full"]:
                               "rank_confirmed":check["rank_confirmed"],
                               "file":f"../../diagnostics/{point.name}/results.json"}
         for sector in sectors:
-            levels = [load(p) for p in point.glob(sector+"-*.json") if not p.name.endswith("-fit.json")]
+            measurements = {}
+            for file in sorted(point.glob(sector+"-*.json"),key=lambda f:f.stem.endswith("-pt2")):
+                if file.name.endswith("-fit.json"):
+                    continue
+                data=load(file)
+                data["_source"]=file.name
+                measurements[data["epsilon_var"]]=data
+            levels=list(measurements.values())
             levels.sort(key=lambda q:-q["epsilon_var"])
             trials[sector] = [dict(epsilon_var=q["epsilon_var"], ndet=q["ndet"],
                  E_var_plus_PT2_Eh=q["E_var_plus_PT2_Eh"],
-                 pt2_threshold=q["pt2_history"][-1]["threshold"]) for q in levels]
+                 pt2_threshold=q["pt2_history"][-1]["threshold"],file=q["_source"]) for q in levels]
             fit_file = point/(sector+"-fit.json")
             if fit_file.exists():
                 fit=load(fit_file)
-                if fit["qualified"]:
+                if fit["qualified"] and fit.get("target_Eh")==target and fit.get("uncertainty_multiplier")==uncertainty_multiplier:
                     assert len(fit["fits"]) == 2
                     for s in fit["fits"]:
-                        assert s["diagnostics_pass"] and s["estimated_uncertainty_Eh"]<=1e-6
+                        assert s["diagnostics_pass"] and s["estimated_uncertainty_Eh"]<=target and s["pt2_screening_change_Eh"]<=screening_target
                         if rank_check and (sector,s["rank"]) == (rank_check["sector"],rank_check["rank"]) and not rank_check["rank_confirmed"]:
                             continue
                         states.append(dict(sector=sector,epsilon_var=fit["epsilon_var"],**s))
         status = "qualified" if len(states)==4 else "partial" if states else "in_progress" if any(trials.values()) else "pending"
-        result=dict(distance_angstrom=r,space=space,status=status,
-                    exact_control=load(point/"exact.json") if (point/"exact.json").exists() else None,
+        result=dict(distance_angstrom=r,space=space,status=status,target_per_root_Eh=target,
+                    exact_control=load(point/"exact-tight.json") if (point/"exact-tight.json").exists() else load(point/"exact.json") if (point/"exact.json").exists() else None,
                     qualified_states=states, threshold_measurements=trials)
         if rank_check:
             result["independent_rank_check"]=rank_check
@@ -63,7 +70,8 @@ for space in ["calibration","full"]:
     if space=="full":
         summary=dict(method="HBCI with deterministic EN-PT2 and zero-PT2 extrapolation",
                      basis="6-31G",electrons=14,orbitals=18,cholesky_tolerance=1e-12,
-                     target_per_root_Eh=1e-6,
+                     target_per_root_Eh=target,pt2_screening_target_Eh=screening_target,
+                     uncertainty_multiplier=uncertainty_multiplier,
                      qualified_roots=sum(len(p["qualified_states"]) for p in curve),
                      requested_roots=len(distances)*4,points=curve)
         write(base/"results.json",summary)

@@ -9,7 +9,7 @@ from scipy.optimize import linear_sum_assignment
 from forte2 import System
 from forte2.orbitals.orbital_overlap import mo_overlap
 
-from grid import settings
+from grid import settings, target
 
 root = Path(__file__).resolve().parent
 parent = root.parent / "all-electron-FCI"
@@ -72,9 +72,11 @@ def roots_at(r,sector):
         fit=point/(sector["label"]+"-fit.json")
         if not fit.exists(): return None
         block=json.loads(fit.read_text())
-        if not block["qualified"]: return None
+        if not block["qualified"] or block.get("target_Eh")!=target: return None
         eps=block["epsilon_var"]
     f=point/f"{sector['label']}-{eps:.8g}.json"
+    if args.epsilon is None and block.get("threshold_files"):
+        f=point/block["threshold_files"][-1]
     if not f.exists(): return None
     coeff=json.loads(f.read_text())["dominant_coefficients"]
     return eps,[components(c,sector) for c in coeff]

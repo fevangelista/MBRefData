@@ -1,6 +1,5 @@
 """Run a halving sequence, validate it on exact controls and apply it to the curve."""
 import concurrent.futures
-import functools
 import json
 import os
 from pathlib import Path
@@ -8,30 +7,45 @@ import subprocess
 import sys
 import numpy as np
 
-from grid import settings
+from grid import settings, target, screening_target, uncertainty_multiplier
 
 root = Path(__file__).resolve().parent
 parent = root.parent / "all-electron-FCI"
 sectors = [s["label"] for s in settings["states"]]
 anchors = [1.10, 2.10]
-epsilons = [0.002 * 0.5**i for i in range(15)]
-target = 1e-6
+epsilons = [0.002 * 0.5**i for i in range(23)]
 
 def write(file, obj):
-    tmp = file.with_suffix(".tmp")
+    tmp = file.with_suffix(f".{os.getpid()}.tmp")
     tmp.write_text(json.dumps(obj, indent=2, allow_nan=False)+"\n")
     tmp.replace(file)
 
-def solve(space, r, sector, epsilon):
+def solve(space, r, sector, epsilon, strict=False):
     point = root / space / f"R-{r:.2f}"
     point.mkdir(parents=True, exist_ok=True)
-    name = f"{sector}-{epsilon:.8g}"
-    result = point / (name+".json")
-    if not result.exists():
-        cmd = [sys.executable, "-u", str(root / "threshold.py"), space, str(r), sector, str(epsilon)]
-        with (point / (name+".out")).open("a") as out:
+    stem = f"{sector}-{epsilon:.8g}"
+    base = point / (stem+".json")
+    tighter = point / (stem+"-pt2.json")
+
+    def read(file):
+        data = json.loads(file.read_text())
+        data["_source"] = file.name
+        return data
+
+    def run(file, flags):
+        cmd = [sys.executable, "-u", str(root/"threshold.py"), space, str(r), sector, str(epsilon), *flags]
+        with file.with_suffix(".out").open("a") as out:
             subprocess.run(cmd, cwd=root, stdout=out, stderr=subprocess.STDOUT, check=True)
-    return json.loads(result.read_text())
+
+    if tighter.exists():
+        return read(tighter)
+    if not base.exists():
+        run(base, [])
+    record = read(base)
+    if strict and record["pt2_screening_change_Eh"] > screening_target:
+        run(tighter, ["--tight-pt2-copy"])
+        return read(tighter)
+    return record
 
 def match_bounds(a, b):
     common = a.keys() & b.keys()
@@ -57,7 +71,7 @@ def fits(records, sector, level):
         three = intercept(p[-3:,i], e[-3:,i])
         screening = max(q["pt2_screening_change_Eh"] for q in rows)
         stable = max(abs(now-prior),abs(now-three))
-        err = level*stable + screening
+        err = level*(stable + screening)
         matched = True
         for a,b in zip(rows,rows[1:]):
             c = a["dominant_coefficients"][i]
@@ -66,10 +80,10 @@ def fits(records, sector, level):
             matched &= low>0.5 and low>match_bounds(c,cs[1-i])[1]
         estimates.append(dict(rank=i+1, extrapolated_total_Eh=now,
             last_variational_Eh=float(e[-1,i]),last_PT2_Eh=float(p[-1,i]),
-            fit_stability_Eh=stable, estimated_uncertainty_Eh=err,
+            fit_stability_Eh=stable, pt2_screening_change_Eh=screening, estimated_uncertainty_Eh=err,
             root_match=bool(matched), spin_squared=rows[-1]["spin_squared"][i],
             diagnostics_pass=bool(matched and abs(rows[-1]["spin_squared"][i]-s2)<1e-5
-                                  and screening<=2e-7 and err<=target)))
+                                  and screening<=screening_target and err<=target)))
     return estimates
 
 def block(job, space, minimum, factor):
@@ -78,7 +92,10 @@ def block(job, space, minimum, factor):
     records=[]
     truth=None
     if space=="calibration":
-        truth=json.loads((point/"exact.json").read_text())[sector]["E_FCI_Eh"]
+        exact_file=point/"exact-tight.json"
+        if not exact_file.exists():
+            exact_file=point/"exact.json"
+        truth=json.loads(exact_file.read_text())[sector]
     for eps in epsilons:
         q=solve(space,r,sector,eps)
         records.append(q)
@@ -86,15 +103,24 @@ def block(job, space, minimum, factor):
         if len(records)<5:
             continue
         estimates=fits(records,sector,factor)
+        # Refresh a loose historical PT2 sum once the variational fit is near the target.
+        if eps<=minimum and (space!="full" or max(s["fit_stability_Eh"] for s in estimates)<=5*target):
+            for j in range(len(records)-5,len(records)):
+                if records[j]["pt2_screening_change_Eh"]>screening_target:
+                    records[j]=solve(space,r,sector,records[j]["epsilon_var"],strict=True)
+            estimates=fits(records,sector,factor)
         if truth:
-            for s,exact in zip(estimates,truth):
+            for s,exact,residual in zip(estimates,truth["E_FCI_Eh"],truth["residual_Eh"]):
                 s["exact_total_Eh"]=exact
                 s["error_vs_FCI_Eh"]=s["extrapolated_total_Eh"]-exact
+                s["exact_residual_Eh"]=residual
         ok=all(s["diagnostics_pass"] for s in estimates) and eps<=minimum
         if truth:
-            ok &= all(abs(s["error_vs_FCI_Eh"])<=target for s in estimates)
+            ok &= all(abs(s["error_vs_FCI_Eh"])+s["exact_residual_Eh"]<=target for s in estimates)
         out=dict(space=space, distance_angstrom=r, sector=sector, qualified=bool(ok),
-                 epsilon_var=eps, levels=[v["epsilon_var"] for v in records], fits=estimates)
+                 epsilon_var=eps, target_Eh=target, pt2_screening_target_Eh=screening_target,
+                 uncertainty_multiplier=factor, levels=[v["epsilon_var"] for v in records],
+                 threshold_files=[v["_source"] for v in records], fits=estimates)
         write(point/(sector+"-fit.json"),out)
         if ok: return out
     raise RuntimeError(f"Target unresolved for {job}. See archived history.")
@@ -104,16 +130,17 @@ def phase(space, jobs, minimum, factor, workers):
         tasks=[pool.submit(block,j,space,minimum,factor) for j in jobs]
         return [f.result() for f in concurrent.futures.as_completed(tasks)]
 
-if __name__=="__main__":
-    # Keep any independent failures visible in the campaign log, with all finished levels resumable.
-    workers=int(os.environ.get("HBCI_WORKERS","2"))
-    controls=phase("calibration",[(r,s) for r in anchors for s in sectors],0.002,1,workers)
-    minimum=min(b["epsilon_var"] for b in controls)
-    factor=max([1.0]+[abs(s["error_vs_FCI_Eh"])/max(s["fit_stability_Eh"],1e-8)
-                        for b in controls for s in b["fits"]])
-    protocol=dict(minimum_refinement_to_epsilon=minimum,calibrated_fit_multiplier=factor,
-                  target_Eh=target,pt2_screening_target_Eh=2e-7,controls=controls)
+def calibrate(workers):
+    controls=phase("calibration",[(r,s) for r in anchors for s in sectors],0.002,uncertainty_multiplier,workers)
+    protocol=dict(minimum_refinement_to_epsilon=min(b["epsilon_var"] for b in controls),
+                  calibrated_fit_multiplier=uncertainty_multiplier,target_Eh=target,
+                  pt2_screening_target_Eh=screening_target,controls=controls)
     write(root/"calibration"/"results.json",protocol)
-    print("Calibrated protocol",minimum,factor,flush=True)
-    for group in [anchors,[r for r in settings["distances_angstrom"] if r not in anchors]]:
-        phase("full",[(r,s) for r in group for s in sectors],minimum,factor,workers)
+    return protocol
+
+if __name__=="__main__":
+    workers=int(os.environ.get("HBCI_WORKERS","2"))
+    protocol=calibrate(workers)
+    distances=anchors+[r for r in settings["distances_angstrom"] if r not in anchors]
+    phase("full",[(r,s) for r in distances for s in sectors],
+          protocol["minimum_refinement_to_epsilon"],uncertainty_multiplier,workers)

@@ -15,7 +15,7 @@ from forte2.lib.det import Determinant, hilbert_space
 from forte2.sci.sci import _SelectedCISingleStateSolver
 from types import SimpleNamespace
 
-from grid import settings as options
+from grid import settings as options, screening_target
 
 root = Path(__file__).resolve().parent
 parent = root.parent / "all-electron-FCI"
@@ -24,13 +24,15 @@ parser.add_argument("space", choices=["calibration", "validation", "full"])
 parser.add_argument("r", type=float, choices=options["distances_angstrom"])
 parser.add_argument("sector", choices=[s["label"] for s in options["states"]])
 parser.add_argument("epsilon", type=float)
+parser.add_argument("--tight-pt2-copy",action="store_true",help="Archive a stricter recomputation alongside the original threshold")
 parser.add_argument("--buffer-roots", type=int, choices=[3, 4, 5],
                     help="Run a separate wide-guess diagnostic with extra roots")
 args = parser.parse_args()
 point = root / args.space / f"R-{args.r:.2f}"
 out_dir = root/"diagnostics"/point.name if args.buffer_roots else point
 out_dir.mkdir(exist_ok=True, parents=True)
-file = out_dir / f"{args.sector}-{args.epsilon:.8g}.json"
+suffix = "-pt2" if args.tight_pt2_copy else ""
+file = out_dir / f"{args.sector}-{args.epsilon:.8g}{suffix}.json"
 # A coarse grid survey can meet a refinement worker at the same threshold.
 lock = file.with_suffix(".lock").open("a")
 fcntl.flock(lock, fcntl.LOCK_EX)
@@ -87,8 +89,12 @@ for pt_threshold in [1e-5, 2e-6, 4e-7, 8e-8, 1.6e-8, 3.2e-9, 0.0]:
     pt2_history.append(dict(threshold=pt_threshold, pt2_Eh=correction.tolist()))
     if len(pt2_history)>=2:
         change = float(np.max(abs(correction-pt2_history[-2]["pt2_Eh"])))
-        if change <= 2e-7:
+        if change <= screening_target:
             break
+if change > screening_target and pt_threshold != 0.0:
+    raise RuntimeError("PT2 screening did not converge")
+if pt_threshold == 0.0:
+    change = 0.0  # The external-space sum is unscreened.
 dominant = []
 for c in solver.evecs.T:
     idx = np.argsort(abs(c))[-128:]
@@ -96,7 +102,7 @@ for c in solver.evecs.T:
 record = dict(space=args.space, distance_angstrom=args.r, sector=args.sector,
               forbidden_operator_bound_Eh=float(forbidden_bound), nroots=nroots, wide_guess=bool(args.buffer_roots), epsilon_var=args.epsilon, ndet=helper.ndets(), E_var_Eh=energies.tolist(),
               E_var_plus_PT2_Eh=(energies+correction).tolist(), pt2_history=pt2_history,
-              pt2_screening_change_Eh=change, spin_squared=list(helper.compute_spin2()),
+              pt2_screening_change_Eh=change, pt2_screening_target_Eh=screening_target, spin_squared=list(helper.compute_spin2()),
               sha256=hashlib.sha256(archive.read_bytes()).hexdigest(), seconds=time.monotonic()-t,
               dominant_coefficients=dominant)
 temp=file.with_suffix(".tmp")
