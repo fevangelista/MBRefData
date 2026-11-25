@@ -125,7 +125,7 @@ def sector_status(root, distance, sector, target, jobs, check, failures):
     current = fit.get("target_Eh") == target
     fitted = fit.get("fits", []) if current else []
     uncertainty = [s["estimated_uncertainty_Eh"]*1e6 for s in fitted] or [None, None]
-    passed = [bool(fit.get("qualified") and s["diagnostics_pass"] and s["estimated_uncertainty_Eh"] <= target)
+    passed = [bool(fit.get("qualified") and s["diagnostics_pass"] and s["estimated_uncertainty_Eh"] < target)
               for s in fitted] or [False, False]
     verified_rank = None
     if check:
@@ -180,9 +180,9 @@ def collect(root, host, target, live):
     return dict(host=host,points=points,jobs=jobs,when=time.time(),live=live,
                 load=round(os.getloadavg()[0],1) if live else None,free=available,
                 calibration=sum(len(b["fits"]) for b in controls.get("controls",[]) if b.get("qualified"))
-                if controls.get("target_Eh")==target else None,
+                if controls.get("target_Eh",float("inf"))<=target else None,
                 validation=sum(bool(s["within_target"]) for s in validation.get("states",[]))
-                if validation.get("target_Eh")==target else None)
+                if validation.get("target_Eh",float("inf"))<=target else None)
 
 
 def remote(host,target):
@@ -264,6 +264,7 @@ class Monitor:
 
     def start(self):
         if self.futures: return
+        self.target=read_json(self.root/"results.json")["target_per_root_Eh"]
         for h in HOSTS:
             self.futures[h]=(self.pool.submit(collect,self.root,h,self.target,False) if self.published
                              else self.pool.submit(remote,h,self.target))

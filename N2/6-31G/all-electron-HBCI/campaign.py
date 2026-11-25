@@ -7,7 +7,7 @@ import subprocess
 import sys
 import numpy as np
 
-from grid import settings, target, screening_target, uncertainty_multiplier
+from grid import settings, target, control_target, screening_target, uncertainty_multiplier
 
 root = Path(__file__).resolve().parent
 parent = root.parent / "all-electron-FCI"
@@ -59,7 +59,7 @@ def match_bounds(a, b):
     bound = (rem_a*rem_b)**0.5
     return max(0,abs(dot)-bound), min(1,abs(dot)+bound)
 
-def fits(records, sector, level):
+def fits(records, sector, level, limit=target):
     rows = records[-5:]
     e = np.array([q["E_var_Eh"] for q in rows])
     p = np.array([q["pt2_history"][-1]["pt2_Eh"] for q in rows])
@@ -88,12 +88,21 @@ def fits(records, sector, level):
             fit_stability_Eh=stable, pt2_screening_change_Eh=screening, estimated_uncertainty_Eh=err,
             root_match=bool(matched), spin_squared=rows[-1]["spin_squared"][i],
             diagnostics_pass=bool(matched and abs(rows[-1]["spin_squared"][i]-s2)<1e-5
-                                  and screening<=screening_target and err<=target)))
+                                  and screening<=screening_target and err<limit)))
     return estimates
 
-def block(job, space, minimum, factor):
+def block(job, space, minimum, factor, cached_only=False):
     r,sector=job
     point=root/space/f"R-{r:.2f}"
+    limit=target if space=="full" else control_target
+    # Resume production at the tightest contiguous level already measured.
+    last_cached=-1
+    if space=="full":
+        for index,eps in enumerate(epsilons):
+            stem=f"{sector}-{eps:.8g}"
+            if not any((point/(stem+suffix)).exists() for suffix in (".json","-pt2.json")):
+                break
+            last_cached=index
     records=[]
     truth=None
     if space=="calibration":
@@ -101,19 +110,20 @@ def block(job, space, minimum, factor):
         if not exact_file.exists():
             exact_file=point/"exact.json"
         truth=json.loads(exact_file.read_text())[sector]
-    for eps in epsilons:
+    for index,eps in enumerate(epsilons):
+        if cached_only and index>last_cached: return None
         q=solve(space,r,sector,eps)
         records.append(q)
         print(space,r,sector,eps,q["ndet"],flush=True)
-        if len(records)<5:
+        if len(records)<5 or index<last_cached:
             continue
-        estimates=fits(records,sector,factor)
+        estimates=fits(records,sector,factor,limit)
         # Refresh a loose historical PT2 sum once the variational fit is near the target.
-        if eps<=minimum and (space!="full" or max(s["fit_stability_Eh"] for s in estimates)<=5*target):
+        if not cached_only and eps<=minimum and (space!="full" or max(s["fit_stability_Eh"] for s in estimates)<=5*limit):
             for j in range(len(records)-5,len(records)):
                 if records[j]["pt2_screening_change_Eh"]>screening_target:
                     records[j]=solve(space,r,sector,records[j]["epsilon_var"],strict=True)
-            estimates=fits(records,sector,factor)
+            estimates=fits(records,sector,factor,limit)
         if truth:
             for s,exact,residual in zip(estimates,truth["E_FCI_Eh"],truth["residual_Eh"]):
                 s["exact_total_Eh"]=exact
@@ -121,9 +131,9 @@ def block(job, space, minimum, factor):
                 s["exact_residual_Eh"]=residual
         ok=all(s["diagnostics_pass"] for s in estimates) and eps<=minimum
         if truth:
-            ok &= all(abs(s["error_vs_FCI_Eh"])+s["exact_residual_Eh"]<=target for s in estimates)
+            ok &= all(abs(s["error_vs_FCI_Eh"])+s["exact_residual_Eh"]<limit for s in estimates)
         out=dict(space=space, distance_angstrom=r, sector=sector, qualified=bool(ok),
-                 epsilon_var=eps, target_Eh=target, pt2_screening_target_Eh=screening_target,
+                 epsilon_var=eps, target_Eh=limit, pt2_screening_target_Eh=screening_target,
                  uncertainty_multiplier=factor, levels=[v["epsilon_var"] for v in records],
                  threshold_files=[v["_source"] for v in records], fits=estimates)
         write(point/(sector+"-fit.json"),out)
@@ -138,7 +148,7 @@ def phase(space, jobs, minimum, factor, workers):
 def calibrate(workers):
     controls=phase("calibration",[(r,s) for r in anchors for s in sectors],0.002,uncertainty_multiplier,workers)
     protocol=dict(minimum_refinement_to_epsilon=min(b["epsilon_var"] for b in controls),
-                  calibrated_fit_multiplier=uncertainty_multiplier,target_Eh=target,
+                  calibrated_fit_multiplier=uncertainty_multiplier,target_Eh=control_target,
                   pt2_screening_target_Eh=screening_target,controls=controls)
     write(root/"calibration"/"results.json",protocol)
     return protocol

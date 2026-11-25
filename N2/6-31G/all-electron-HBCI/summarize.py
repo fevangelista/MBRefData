@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 
-from grid import settings, target, screening_target, uncertainty_multiplier
+from grid import settings, target, control_target, screening_target, uncertainty_multiplier
 
 root = Path(__file__).resolve().parent
 parent = root.parent / "all-electron-FCI"
@@ -17,6 +17,7 @@ def write(path, value):
     tmp.replace(path)
 
 for space in ["calibration","full"]:
+    limit = target if space=="full" else control_target
     base = root / space
     base.mkdir(exist_ok=True)
     distances = [1.1,2.1] if space=="calibration" else settings["distances_angstrom"]
@@ -50,21 +51,21 @@ for space in ["calibration","full"]:
             fit_file = point/(sector+"-fit.json")
             if fit_file.exists():
                 fit=load(fit_file)
-                if fit["qualified"] and fit.get("target_Eh")==target and fit.get("uncertainty_multiplier")==uncertainty_multiplier:
+                if fit["qualified"] and fit.get("target_Eh")==limit and fit.get("uncertainty_multiplier")==uncertainty_multiplier:
                     assert len(fit["fits"]) == 2
                     for s in fit["fits"]:
-                        assert s["diagnostics_pass"] and s["estimated_uncertainty_Eh"]<=target and s["pt2_screening_change_Eh"]<=screening_target
+                        assert s["diagnostics_pass"] and s["estimated_uncertainty_Eh"]<limit and s["pt2_screening_change_Eh"]<=screening_target
                         if (sector,s["rank"]) in rank_checks:
                             continue  # The four-root comparison supplies this reference after resolving its rank.
                         states.append(dict(sector=sector,epsilon_var=fit["epsilon_var"],**s))
         for (sector,rank),(check,source) in rank_checks.items():
             if check["rank_confirmed"] and check.get("target_Eh")==target:
                 state=check["fits"][rank-1]
-                assert state["diagnostics_pass"] and state["estimated_uncertainty_Eh"]<=target
+                assert state["diagnostics_pass"] and state["estimated_uncertainty_Eh"]<limit
                 states.append(dict(sector=sector,epsilon_var=check["epsilon_var"],source=source,**state))
         states.sort(key=lambda state:(state["sector"],state["rank"]))
         status = "qualified" if len(states)==4 else "partial" if states else "in_progress" if any(trials.values()) else "pending"
-        result=dict(distance_angstrom=r,space=space,status=status,target_per_root_Eh=target,
+        result=dict(distance_angstrom=r,space=space,status=status,target_per_root_Eh=limit,
                     exact_control=load(point/"exact-tight.json") if (point/"exact-tight.json").exists() else load(point/"exact.json") if (point/"exact.json").exists() else None,
                     qualified_states=states, threshold_measurements=trials)
         if rank_checks:

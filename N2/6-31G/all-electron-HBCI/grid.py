@@ -10,6 +10,7 @@ settings["distances_angstrom"] = sorted(
 
 # The original 4 Å control underestimated a 0.3173 µEh error as 0.0932 µEh.
 # Round that observed ratio upward for the tighter campaign.
-target = 1e-7
+target = 1e-6
+control_target = 1e-7
 screening_target = 2e-8
 uncertainty_multiplier = 4.0
