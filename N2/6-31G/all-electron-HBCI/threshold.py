@@ -3,6 +3,7 @@ import argparse
 import hashlib
 import fcntl
 import json
+import socket
 from math import comb
 from pathlib import Path
 import time
@@ -101,7 +102,7 @@ dominant = []
 for c in solver.evecs.T:
     idx = np.argsort(abs(c))[-128:]
     dominant.append({solver.dets[int(i)].str(norb):float(c[i]) for i in idx})
-record = dict(space=args.space, distance_angstrom=args.r, sector=args.sector,
+record = dict(execution_host=socket.gethostname(), space=args.space, distance_angstrom=args.r, sector=args.sector,
               forbidden_operator_bound_Eh=float(forbidden_bound), nroots=nroots, wide_guess=bool(args.buffer_roots), epsilon_var=args.epsilon, ndet=helper.ndets(), E_var_Eh=energies.tolist(),
               E_var_plus_PT2_Eh=(energies+correction).tolist(), pt2_history=pt2_history,
               pt2_screening_change_Eh=change, pt2_screening_target_Eh=screening_target, spin_squared=list(helper.compute_spin2()),

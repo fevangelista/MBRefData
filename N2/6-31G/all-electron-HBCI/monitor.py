@@ -27,7 +27,12 @@ def read_json(path, default=None):
 
 def host_grid(root, host):
     grid = read_json(root.parent / "all-electron-FCI/input.json")
-    return grid["distances_angstrom" if host == HOSTS[0] else "additional_hbci_distances_angstrom"]
+    owners = read_json(root / ".cluster/owners.json", {})
+    delegated = {float(r) for r,h in owners.items() if h == HOSTS[1]}
+    original = set(grid["distances_angstrom"])
+    if host == HOSTS[0]:
+        return sorted(original - delegated)
+    return sorted(set(grid["additional_hbci_distances_angstrom"]) | delegated)
 
 
 def tail(path, size=8000):
@@ -162,6 +167,9 @@ def collect(root, host, target, live):
     failures = set()
     if live:
         name = "hbci-strict-original.log" if host==HOSTS[0] else "hbci-strict-extension.log"
+        for file in (root/".cluster").glob("*.failed"):
+            distance, sector = file.stem.split("-",1)
+            failures.add((float(distance),sector))
         for line in tail(Path.home()/"MBRefData-runs"/name, 16000):
             match = re.match(r"Failed \(([\d.]+), '([^']+)'\)",line)
             if match:
@@ -260,6 +268,7 @@ class Monitor:
         self.published=published
         self.pool=concurrent.futures.ThreadPoolExecutor(max_workers=2)
         self.data={h:collect(root,h,self.target,False) for h in HOSTS}
+        self.baseline={p["r"]:p for d in self.data.values() for p in d["points"]}
         self.futures={}
 
     def start(self):
@@ -278,7 +287,12 @@ class Monitor:
                 del self.futures[h]
 
     def points(self):
-        return sorted((p for d in self.data.values() for p in d["points"]),key=lambda p:p["r"])
+        # Merge asynchronous snapshots around handoffs, using the published row
+        # until the receiving host confirms its copy.
+        points = dict(self.baseline)
+        for host in HOSTS:
+            points.update((p["r"],p) for p in self.data[host]["points"])
+        return [points[r] for r in sorted(points)]
 
     def headline(self):
         n=sum(sum(s["passed"]) for p in self.points() for s in p["sectors"])
