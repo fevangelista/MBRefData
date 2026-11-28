@@ -1,0 +1,1276 @@
+=================================================================================
+Content of /home/francesco/MBRefData-runs/N2/6-31G/all-electron-HBCI/threshold.py
+=================================================================================
+"""Solve one variational threshold and converge deterministic EN-PT2 at fixed wavefunction."""
+import argparse
+import hashlib
+import fcntl
+import json
+import socket
+from math import comb
+from pathlib import Path
+import time
+
+import numpy as np
+from forte2 import MOSpace, State
+from forte2.base_classes import DavidsonLiuParams, SelectedCIParams
+from forte2.helpers import logger
+from forte2.lib.det import Determinant, hilbert_space
+from forte2.sci.sci import _SelectedCISingleStateSolver
+from types import SimpleNamespace
+
+from grid import settings as options, screening_target
+
+root = Path(__file__).resolve().parent
+parent = root.parent / "all-electron-FCI"
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("space", choices=["calibration", "validation", "full"])
+parser.add_argument("r", type=float, choices=options["distances_angstrom"])
+parser.add_argument("sector", choices=[s["label"] for s in options["states"]])
+parser.add_argument("epsilon", type=float)
+parser.add_argument("--tight-pt2-copy",action="store_true",help="Archive a stricter recomputation alongside the original threshold")
+parser.add_argument("--buffer-roots", type=int, choices=[3, 4, 5],
+                    help="Run a separate wide-guess diagnostic with extra roots")
+args = parser.parse_args()
+point = root / args.space / f"R-{args.r:.2f}"
+out_dir = point
+if args.buffer_roots:
+    out_dir = root/"diagnostics"/point.name if args.space=="full" else point/"buffered"
+out_dir.mkdir(exist_ok=True, parents=True)
+suffix = "-pt2" if args.tight_pt2_copy else ""
+file = out_dir / f"{args.sector}-{args.epsilon:.8g}{suffix}.json"
+# A coarse grid survey can meet a refinement worker at the same threshold.
+lock = file.with_suffix(".lock").open("a")
+fcntl.flock(lock, fcntl.LOCK_EX)
+if file.exists():
+    raise SystemExit(0)
+archive = (parent / point.name if args.space == "full" else point) / "hamiltonian.npz"
+target = next(s for s in options["states"] if s["label"] == args.sector)
+state = State(nel=14, multiplicity=target["multiplicity"], ms=target["ms"],
+              symmetry=target["irrep_index"], symmetry_label=target["irrep"])
+with np.load(archive) as a:
+    irreps = a["orbital_irreps"].astype(int)
+    ints = SimpleNamespace(E=float(a["scalar_Eh"]), H=a["h"], V=a["V"])
+pair = irreps[:, None] ^ irreps[None, :]
+# Forbidden operators have zero matrix elements inside a single target irrep.
+# The Frobenius bound also limits the effect if one compares the entire operator.
+forbidden_bound = 0.0
+for integrals, forbidden, count in [(ints.H, pair != 0, 14),
+        (ints.V, pair[:, :, None, None] != pair[None, None, :, :], comb(14, 2))]:
+    forbidden_bound += count * np.linalg.norm(integrals[forbidden])
+    integrals[forbidden] = 0.0
+if forbidden_bound >= 1e-6:
+    raise ValueError(f"Inspect symmetry labels: discarded-operator bound {forbidden_bound} Eh")
+norb = len(irreps)
+# Start from determinants of the requested irrep, including single and double excitations.
+# The guess restriction is lifted during heat-bath selection.
+seeds = hilbert_space(10, state.na, state.nb, 8, irreps[:10].tolist(), state.symmetry)
+nroots = args.buffer_roots or target["nroots"]
+if args.buffer_roots:
+    ref = Determinant("2"*state.nb+"a"*(state.na-state.nb))
+    seeds = hilbert_space(norb,state.na,state.nb,ref,2,8,irreps.tolist(),state.symmetry)
+dav = DavidsonLiuParams(e_tol=1e-11, r_tol=5e-8, basis_per_root=18, collapse_per_root=4,
+                       maxiter=250, ndets_per_guess=20)
+params = SelectedCIParams(guess_dets=seeds, var_threshold=args.epsilon,
+                          pt2_threshold=args.epsilon, e_tol=1e-13, maxcycle=120,
+                          num_batches_per_thread=2)
+logger.set_verbosity_level(logger.VERBOSITY_INFO1)
+t = time.monotonic()
+solver = _SelectedCISingleStateSolver(mo_space=MOSpace(nmo=norb, active_orbitals=list(range(norb))),
+    state=state, ints=ints, nroot=nroots, active_orbsym=[irreps.tolist()], sci_params=params,
+    davidson_liu_params=dav, die_if_not_converged=True, log_level=logger.VERBOSITY_INFO1)
+solver.run()
+assert solver.eigensolver.converged and solver.sci_helper.num_new_dets_var() == 0
+energies = np.asarray(solver.e_var)
+assert np.all(np.diff(energies)>=0)
+helper = solver.sci_helper
+assert helper.ndets()==solver.evecs.shape[0]
+# No promotions during these calls: PT2 thresholds are compared in the identical space.
+pt2_history = []
+for pt_threshold in [1e-5, 2e-6, 4e-7, 8e-8, 1.6e-8, 3.2e-9, 0.0]:
+    helper.select_hbci(float("inf"), pt_threshold)
+    assert helper.ndets()==len(solver.dets)
+    correction = np.array(helper.ept2_pt())
+    assert np.isfinite(correction).all()
+    pt2_history.append(dict(threshold=pt_threshold, pt2_Eh=correction.tolist()))
+    if len(pt2_history)>=2:
+        change = float(np.max(abs(correction-pt2_history[-2]["pt2_Eh"])))
+        if change <= screening_target:
+            break
+if change > screening_target and pt_threshold != 0.0:
+    raise RuntimeError("PT2 screening did not converge")
+if pt_threshold == 0.0:
+    change = 0.0  # The external-space sum is unscreened.
+dominant = []
+for c in solver.evecs.T:
+    idx = np.argsort(abs(c))[-128:]
+    dominant.append({solver.dets[int(i)].str(norb):float(c[i]) for i in idx})
+record = dict(execution_host=socket.gethostname(), space=args.space, distance_angstrom=args.r, sector=args.sector,
+              forbidden_operator_bound_Eh=float(forbidden_bound), nroots=nroots, wide_guess=bool(args.buffer_roots), epsilon_var=args.epsilon, ndet=helper.ndets(), E_var_Eh=energies.tolist(),
+              E_var_plus_PT2_Eh=(energies+correction).tolist(), pt2_history=pt2_history,
+              pt2_screening_change_Eh=change, pt2_screening_target_Eh=screening_target, spin_squared=list(helper.compute_spin2()),
+              sha256=hashlib.sha256(archive.read_bytes()).hexdigest(), seconds=time.monotonic()-t,
+              dominant_coefficients=dominant)
+temp=file.with_suffix(".tmp")
+temp.write_text(json.dumps(record,allow_nan=False)+"\n")
+temp.replace(file)
+print("Finished",file.name,record["ndet"],record["E_var_plus_PT2_Eh"],record["spin_squared"],flush=True)
+
+=================================================================================
+forte2: using 4 threads for parallel sections
+Number of guess determinants: 97
+S^2 values of the guess determinants: [-1.57378645e-15 -1.45640303e-15 -7.17501664e-16 -5.61848707e-16
+ -4.64567505e-16  0.00000000e+00  0.00000000e+00  0.00000000e+00
+  0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00
+  0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00
+  0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00
+  0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00
+  0.00000000e+00  1.20722459e-16  4.11207903e-16  4.15101000e-16
+  4.15101000e-16  4.15101000e-16  4.15101000e-16  4.43365117e-16
+  7.04943399e-16  7.52848772e-16  8.09616561e-16  9.00974074e-16
+  1.02781472e-15  1.27371371e-15  1.78768622e-15  1.78768622e-15
+  1.78768622e-15  1.78768622e-15  2.65455215e-15  2.00000000e+00
+  2.00000000e+00  2.00000000e+00  2.00000000e+00  2.00000000e+00
+  2.00000000e+00  2.00000000e+00  2.00000000e+00  2.00000000e+00
+  2.00000000e+00  2.00000000e+00  2.00000000e+00  2.00000000e+00
+  2.00000000e+00  2.00000000e+00  2.00000000e+00  2.00000000e+00
+  2.00000000e+00  2.00000000e+00  2.00000000e+00  2.00000000e+00
+  2.00000000e+00  2.00000000e+00  2.00000000e+00  2.00000000e+00
+  2.00000000e+00  2.00000000e+00  2.00000000e+00  2.00000000e+00
+  2.00000000e+00  2.00000000e+00  2.00000000e+00  2.00000000e+00
+  2.00000000e+00  2.00000000e+00  2.00000000e+00  2.00000000e+00
+  2.00000000e+00  2.00000000e+00  6.00000000e+00  6.00000000e+00
+  6.00000000e+00  6.00000000e+00  6.00000000e+00  6.00000000e+00
+  6.00000000e+00  6.00000000e+00  6.00000000e+00  6.00000000e+00
+  6.00000000e+00  6.00000000e+00  6.00000000e+00  6.00000000e+00
+  1.20000000e+01]
+Target S(S+1) = 0.0, found 43 eigenvalues close to it.
+Initial guess energies: [-108.70971488 -108.58550627]
+Number of determinants: 97
+
+===================================================================
+Selected CI Cycle 1
+===================================================================
+Algorithm: hbci
+  var_threshold = 1.220703125e-07
+  pt2_threshold = 1.220703125e-07
+Thread 0 processed 2 batches, found 0 new determinants in 0.00445915 seconds (avg 0.00222958 s/batch, 0.000000 dets/s)
+Thread 1 processed 2 batches, found 0 new determinants in 0.00460725 seconds (avg 0.00230362 s/batch, 0.000000 dets/s)
+Thread 2 processed 2 batches, found 0 new determinants in 0.00474157 seconds (avg 0.00237078 s/batch, 0.000000 dets/s)
+Thread 3 processed 2 batches, found 0 new determinants in 0.0049564 seconds (avg 0.0024782 s/batch, 0.000000 dets/s)
+
+Summary of selection:
+  Initial # of variational determinants:  97
+  Variational added:                      78595
+  Total variational determinants:         78692
+  Perturbatively included:                0
+  Selection time:                         0.064 s
+
+==============================================================
+Root            E (CI) [Eh]   S^2 (CI)   E (CI) + E (PT2) [Eh]
+--------------------------------------------------------------
+   0      -108.709714883564      0.000       -108.863431584254
+   1      -108.585506266439      0.000       -108.720264400472
+==============================================================
+
+Davidson-Liu solver configuration:
+  Size of the space:        78692
+  Number of roots:          2
+  Maximum size of subspace: 36
+  Size of collapsed space:  8
+  Energy convergence:       1e-11
+  Residual convergence:     5e-08
+  Maximum iterations:       250
+
+=====================================================================================================
+Iter                    ⟨E⟩        max(ΔE)         max(r)   basis     time (s)                   note
+-----------------------------------------------------------------------------------------------------
+   0      -108.647610575001    +1.0871e+02    +6.0161e-01       4       0.9914                       
+   1      -108.775009991090    +1.4037e-01    +1.7216e-01       6       0.9899                       
+   2      -108.783210648306    +9.6545e-03    +1.0359e-01       8       0.9879                       
+   3      -108.786310683273    +3.2671e-03    +5.8331e-02      10       0.9904                       
+   4      -108.787543778162    +1.3747e-03    +4.1313e-02      12       0.9604                       
+   5      -108.788378553915    +1.1496e-03    +3.7443e-02      14       1.0015                       
+   6      -108.788883797930    +8.6578e-04    +2.9440e-02      16       0.9820                       
+   7      -108.789108446040    +4.0419e-04    +2.0907e-02      18       1.0015                       
+   8      -108.789196466463    +1.6330e-04    +1.4439e-02      20       1.0054                       
+   9      -108.789238832837    +8.0649e-05    +8.6181e-03      22       0.9654                       
+  10      -108.789252444880    +2.6294e-05    +4.9910e-03      24       1.0110                       
+  11      -108.789257151580    +9.2067e-06    +2.8636e-03      26       0.9995                       
+  12      -108.789259224265    +4.0790e-06    +2.0797e-03      28       1.0165                       
+  13      -108.789260383024    +2.2959e-06    +1.6978e-03      30       1.0033                       
+  14      -108.789261079397    +1.3861e-06    +1.1820e-03      32       0.9974                       
+  15      -108.789261361310    +5.6226e-07    +7.0716e-04      34       1.0022                       
+  16      -108.789261457556    +1.9211e-07    +3.8909e-04      36       0.9693                       
+  17      -108.789261488977    +6.2741e-08    +2.1864e-04      10       0.8978                       
+  18      -108.789261496368    +1.4761e-08    +1.2310e-04      12       0.7400                       
+  19      -108.789261500018    +7.2924e-09    +9.1562e-05      14       0.7160                       
+  20      -108.789261501281    +2.5238e-09    +5.8783e-05      16       0.7437                       
+  21      -108.789261501715    +8.6764e-10    +3.3797e-05      18       0.7375                       
+  22      -108.789261501866    +3.0130e-10    +1.7719e-05      20       0.7389                       
+  23      -108.789261501936    +1.4023e-10    +1.2582e-05      22       0.7401                       
+  24      -108.789261501970    +6.7331e-11    +9.9104e-06      24       0.7468                       
+  25      -108.789261501987    +3.3864e-11    +6.3065e-06      26       0.7480                       
+  26      -108.789261501994    +1.4850e-11    +3.6084e-06      28       0.7433                       
+  27      -108.789261501996    +3.8511e-12    +1.8120e-06      30       0.7731                       
+  28      -108.789261501997    +9.9476e-13    +9.2656e-07      32       0.8471                       
+  29      -108.789261501997    +5.4001e-13    +5.6164e-07      34       0.9040                       
+  30      -108.789261501997    +2.8422e-14    +3.3111e-07      36       0.8259                       
+  31      -108.789261501997    +2.8422e-14    +1.8980e-07      10       1.0431                       
+  32      -108.789261501997    +1.5632e-13    +9.7804e-08      12       1.0038                       
+  33      -108.789261501997    +2.8422e-14    +7.3615e-08      14       0.9713                       
+  34      -108.789261501997    +7.1054e-14    +5.6464e-08      16       1.0204                       
+=====================================================================================================
+
+Davidson-Liu solver converged in 32.842 seconds.
+
+
+===================================================================
+Selected CI Cycle 2
+===================================================================
+Algorithm: hbci
+  var_threshold = 1.220703125e-07
+  pt2_threshold = 1.220703125e-07
+Thread 0 processed 2 batches, found 0 new determinants in 1.9037 seconds (avg 0.951848 s/batch, 0.000000 dets/s)
+Thread 1 processed 2 batches, found 0 new determinants in 1.87738 seconds (avg 0.938688 s/batch, 0.000000 dets/s)
+Thread 2 processed 2 batches, found 0 new determinants in 1.87481 seconds (avg 0.937406 s/batch, 0.000000 dets/s)
+Thread 3 processed 2 batches, found 0 new determinants in 1.93631 seconds (avg 0.968156 s/batch, 0.000000 dets/s)
+
+Summary of selection:
+  Initial # of variational determinants:  78692
+  Variational added:                      5393032
+  Total variational determinants:         5471724
+  Perturbatively included:                0
+  Selection time:                         6.565 s
+
+==============================================================
+Root            E (CI) [Eh]   S^2 (CI)   E (CI) + E (PT2) [Eh]
+--------------------------------------------------------------
+   0      -108.864830454387      0.000       -108.872332774497
+   1      -108.713692549607      0.000       -108.719900895369
+==============================================================
+
+Davidson-Liu solver configuration:
+  Size of the space:        5471724
+  Number of roots:          2
+  Maximum size of subspace: 36
+  Size of collapsed space:  8
+  Energy convergence:       1e-11
+  Residual convergence:     5e-08
+  Maximum iterations:       250
+
+=====================================================================================================
+Iter                    ⟨E⟩        max(ΔE)         max(r)   basis     time (s)                   note
+-----------------------------------------------------------------------------------------------------
+   0      -108.789261501995    +1.0886e+02    +1.8814e-01       4      72.8077                       
+   1      -108.795914575178    +7.4732e-03    +4.7649e-02       6      80.6114                       
+   2      -108.796433971510    +5.9213e-04    +1.9397e-02       8      90.2982                       
+   3      -108.796492519195    +5.9752e-05    +1.0274e-02      10     103.7314                       
+   4      -108.796516845013    +2.7352e-05    +6.2091e-03      12      74.9458                       
+   5      -108.796527303291    +1.4834e-05    +5.0357e-03      14      99.2074                       
+   6      -108.796533336430    +9.8480e-06    +4.4942e-03      16      82.2519                       
+   7      -108.796537184519    +7.1274e-06    +3.3399e-03      18     127.7106                       
+   8      -108.796538973749    +3.3718e-06    +2.2631e-03      20      67.9176                       
+   9      -108.796539855474    +1.6894e-06    +1.6882e-03      22      70.9165                       
+  10      -108.796540286197    +8.3744e-07    +1.2511e-03      24      72.2974                       
+  11      -108.796540497138    +4.1561e-07    +8.6833e-04      26     109.8150                       
+  12      -108.796540581675    +1.6737e-07    +5.1672e-04      28      73.5378                       
+  13      -108.796540613013    +6.2186e-08    +2.8040e-04      30      74.9651                       
+  14      -108.796540623216    +2.0287e-08    +1.8920e-04      32      75.3993                       
+  15      -108.796540628413    +1.0350e-08    +1.4050e-04      34      88.9735                       
+  16      -108.796540631465    +6.0873e-09    +9.8908e-05      36      65.5269                       
+  17      -108.796540632863    +2.7916e-09    +6.4981e-05      10      90.5546                       
+  18      -108.796540633202    +6.7787e-10    +4.1204e-05      12      86.2118                       
+  19      -108.796540633430    +4.5584e-10    +3.1945e-05      14     102.8643                       
+  20      -108.796540633558    +2.5705e-10    +2.3129e-05      16      54.9131                       
+  21      -108.796540633608    +9.9391e-11    +1.3124e-05      18      71.3577                       
+  22      -108.796540633625    +3.3239e-11    +6.9406e-06      20     111.3860                       
+  23      -108.796540633631    +1.2349e-11    +4.4373e-06      22      81.0130                       
+  24      -108.796540633633    +4.3343e-12    +2.6716e-06      24      95.4694                       
+  25      -108.796540633634    +1.6911e-12    +1.5349e-06      26     105.6558                       
+  26      -108.796540633634    +4.8317e-13    +9.7980e-07      28     130.8395                       
+  27      -108.796540633634    +4.6896e-13    +6.2086e-07      30     107.0861                       
+  28      -108.796540633635    +1.4211e-13    +4.0148e-07      32      81.5828                       
+  29      -108.796540633634    +9.9476e-14    +2.6702e-07      34      92.6855                       
+  30      -108.796540633634    +1.4211e-14    +1.5158e-07      36      96.3990                       
+  31      -108.796540633634    +7.1054e-14    +7.3359e-08      10      91.6183                       
+=====================================================================================================
+
+Davidson-Liu solver converged in 2939.695 seconds.
+
+
+===================================================================
+Selected CI Cycle 3
+===================================================================
+Algorithm: hbci
+  var_threshold = 1.220703125e-07
+  pt2_threshold = 1.220703125e-07
+Thread 0 processed 2 batches, found 0 new determinants in 18.3911 seconds (avg 9.19555 s/batch, 0.000000 dets/s)
+Thread 1 processed 2 batches, found 0 new determinants in 22.1991 seconds (avg 11.0996 s/batch, 0.000000 dets/s)
+Thread 2 processed 2 batches, found 0 new determinants in 18.8102 seconds (avg 9.40512 s/batch, 0.000000 dets/s)
+Thread 3 processed 2 batches, found 0 new determinants in 19.2545 seconds (avg 9.62724 s/batch, 0.000000 dets/s)
+
+Summary of selection:
+  Initial # of variational determinants:  5471724
+  Variational added:                      19552080
+  Total variational determinants:         25023804
+  Perturbatively included:                0
+  Selection time:                         40.045 s
+
+==============================================================
+Root            E (CI) [Eh]   S^2 (CI)   E (CI) + E (PT2) [Eh]
+--------------------------------------------------------------
+   0      -108.872983651292      0.000       -108.873061392076
+   1      -108.720097615977      0.000       -108.720172628738
+==============================================================
+
+Davidson-Liu solver configuration:
+  Size of the space:        25023804
+  Number of roots:          2
+  Maximum size of subspace: 36
+  Size of collapsed space:  8
+  Energy convergence:       1e-11
+  Residual convergence:     5e-08
+  Maximum iterations:       250
+
+=====================================================================================================
+Iter                    ⟨E⟩        max(ΔE)         max(r)   basis     time (s)                   note
+-----------------------------------------------------------------------------------------------------
+   0      -108.796540634497    +1.0887e+02    +2.4249e-02       4     395.3974                       
+   1      -108.796615772820    +7.7302e-05    +3.8632e-03       6     382.4968                       
+   2      -108.796617975531    +2.2539e-06    +9.0139e-04       8     331.0753                       
+   3      -108.796618089329    +1.1411e-07    +3.3863e-04      10     348.9629                       
+   4      -108.796618102227    +1.3596e-08    +1.3249e-04      12     452.4987                       
+   5      -108.796618104622    +2.5197e-09    +6.8268e-05      14     426.6222                       
+   6      -108.796618105376    +8.2281e-10    +3.6602e-05      16     313.2611                       
+   7      -108.796618105613    +2.6323e-10    +2.1888e-05      18     420.5085                       
+   8      -108.796618105705    +1.0890e-10    +1.3810e-05      20     354.7029                       
+   9      -108.796618105741    +5.0008e-11    +9.4412e-06      22     547.9674                       
+  10      -108.796618105757    +2.3974e-11    +6.7922e-06      24     350.2677                       
+  11      -108.796618105763    +1.0971e-11    +4.5722e-06      26     430.7088                       
+  12      -108.796618105766    +4.0359e-12    +2.9451e-06      28     379.6356                       
+  13      -108.796618105767    +1.8758e-12    +1.8029e-06      30     417.0084                       
+  14      -108.796618105767    +6.1107e-13    +1.0885e-06      32     385.6615                       
+  15      -108.796618105767    +2.4158e-13    +6.2138e-07      34     394.5759                       
+  16      -108.796618105767    +9.9476e-14    +3.9517e-07      36     434.8818                       
+  17      -108.796618105767    +1.2790e-13    +2.6443e-07      10     394.5043                       
+  18      -108.796618105768    +8.2423e-13    +1.8010e-07      12     334.2565                       
+  19      -108.796618105768    +7.1054e-14    +1.7231e-07      14     387.5032                       
+  20      -108.796618105768    +2.2737e-13    +1.2544e-07      16     373.6640                       
+  21      -108.796618105768    +2.1316e-13    +6.7159e-08      18     311.3382                       
+=====================================================================================================
+
+Davidson-Liu solver converged in 8959.600 seconds.
+
+
+===================================================================
+Selected CI Cycle 4
+===================================================================
+Algorithm: hbci
+  var_threshold = 1.220703125e-07
+  pt2_threshold = 1.220703125e-07
+Thread 0 processed 2 batches, found 0 new determinants in 34.009 seconds (avg 17.0045 s/batch, 0.000000 dets/s)
+Thread 1 processed 2 batches, found 0 new determinants in 34.9619 seconds (avg 17.481 s/batch, 0.000000 dets/s)
+Thread 2 processed 2 batches, found 0 new determinants in 36.2667 seconds (avg 18.1333 s/batch, 0.000000 dets/s)
+Thread 3 processed 2 batches, found 0 new determinants in 36.8084 seconds (avg 18.4042 s/batch, 0.000000 dets/s)
+
+Summary of selection:
+  Initial # of variational determinants:  25023804
+  Variational added:                      2380316
+  Total variational determinants:         27404120
+  Perturbatively included:                0
+  Selection time:                         54.762 s
+
+==============================================================
+Root            E (CI) [Eh]   S^2 (CI)   E (CI) + E (PT2) [Eh]
+--------------------------------------------------------------
+   0      -108.873063337988      0.000       -108.873063683375
+   1      -108.720172873548      0.000       -108.720173245539
+==============================================================
+
+Davidson-Liu solver configuration:
+  Size of the space:        27404120
+  Number of roots:          2
+  Maximum size of subspace: 36
+  Size of collapsed space:  8
+  Energy convergence:       1e-11
+  Residual convergence:     5e-08
+  Maximum iterations:       250
+
+=====================================================================================================
+Iter                    ⟨E⟩        max(ΔE)         max(r)   basis     time (s)                   note
+-----------------------------------------------------------------------------------------------------
+   0      -108.796618116634    +1.0887e+02    +2.0330e-03       4     438.5201                       
+   1      -108.796618523791    +4.2578e-07    +2.4141e-04       6     439.0667                       
+   2      -108.796618530143    +6.5382e-09    +3.4465e-05       8     425.8862                       
+   3      -108.796618530297    +1.5986e-10    +6.8702e-06      10     535.4935                       
+   4      -108.796618530303    +6.5654e-12    +2.4786e-06      12     450.0038                       
+   5      -108.796618530304    +8.8107e-13    +1.3314e-06      14     404.5203                       
+   6      -108.796618530304    +4.5475e-13    +5.7847e-07      16     384.6402                       
+   7      -108.796618530304    +2.5580e-13    +2.7216e-07      18     418.7454                       
+   8      -108.796618530304    +2.2737e-13    +1.4512e-07      20     405.1618                       
+   9      -108.796618530304    +2.8422e-14    +1.0692e-07      22     494.4575                       
+  10      -108.796618530304    +2.8422e-14    +7.5129e-08      24     408.9794                       
+  11      -108.796618530304    +1.4211e-14    +5.2474e-08      26     438.1819                       
+=====================================================================================================
+
+Davidson-Liu solver converged in 5700.264 seconds.
+
+
+===================================================================
+Selected CI Cycle 5
+===================================================================
+Algorithm: hbci
+  var_threshold = 1.220703125e-07
+  pt2_threshold = 1.220703125e-07
+Thread 0 processed 2 batches, found 0 new determinants in 38.5845 seconds (avg 19.2923 s/batch, 0.000000 dets/s)
+Thread 1 processed 2 batches, found 0 new determinants in 40.8944 seconds (avg 20.4472 s/batch, 0.000000 dets/s)
+Thread 2 processed 2 batches, found 0 new determinants in 39.2344 seconds (avg 19.6172 s/batch, 0.000000 dets/s)
+Thread 3 processed 2 batches, found 0 new determinants in 41.9996 seconds (avg 20.9998 s/batch, 0.000000 dets/s)
+
+Summary of selection:
+  Initial # of variational determinants:  27404120
+  Variational added:                      24992
+  Total variational determinants:         27429112
+  Perturbatively included:                0
+  Selection time:                         68.417 s
+
+==============================================================
+Root            E (CI) [Eh]   S^2 (CI)   E (CI) + E (PT2) [Eh]
+--------------------------------------------------------------
+   0      -108.873063747563      0.000       -108.873063747701
+   1      -108.720173313046      0.000       -108.720173313176
+==============================================================
+
+Davidson-Liu solver configuration:
+  Size of the space:        27429112
+  Number of roots:          2
+  Maximum size of subspace: 36
+  Size of collapsed space:  8
+  Energy convergence:       1e-11
+  Residual convergence:     5e-08
+  Maximum iterations:       250
+
+=====================================================================================================
+Iter                    ⟨E⟩        max(ΔE)         max(r)   basis     time (s)                   note
+-----------------------------------------------------------------------------------------------------
+   0      -108.796618532595    +1.0887e+02    +1.0282e-04       4     405.8690                       
+   1      -108.796618533393    +8.9163e-10    +7.8947e-06       6     415.1838                       
+   2      -108.796618533398    +5.7270e-12    +9.4909e-07       8     426.3121                       
+   3      -108.796618533398    +4.2633e-14    +2.4281e-07      10     382.1759                       
+   4      -108.796618533398    +2.8422e-14    +1.0976e-07      12     439.0083                       
+=====================================================================================================
+
+Davidson-Liu solver converged in 2495.945 seconds.
+
+
+===================================================================
+Selected CI Cycle 6
+===================================================================
+Algorithm: hbci
+  var_threshold = 1.220703125e-07
+  pt2_threshold = 1.220703125e-07
+Thread 0 processed 2 batches, found 0 new determinants in 35.8411 seconds (avg 17.9206 s/batch, 0.000000 dets/s)
+Thread 1 processed 2 batches, found 0 new determinants in 35.7037 seconds (avg 17.8518 s/batch, 0.000000 dets/s)
+Thread 2 processed 2 batches, found 0 new determinants in 36.7536 seconds (avg 18.3768 s/batch, 0.000000 dets/s)
+Thread 3 processed 2 batches, found 0 new determinants in 49.4825 seconds (avg 24.7413 s/batch, 0.000000 dets/s)
+
+Summary of selection:
+  Initial # of variational determinants:  27429112
+  Variational added:                      74
+  Total variational determinants:         27429186
+  Perturbatively included:                0
+  Selection time:                         71.398 s
+
+==============================================================
+Root            E (CI) [Eh]   S^2 (CI)   E (CI) + E (PT2) [Eh]
+--------------------------------------------------------------
+   0      -108.873063751218      0.000       -108.873063751218
+   1      -108.720173315579      0.000       -108.720173315579
+==============================================================
+
+Davidson-Liu solver configuration:
+  Size of the space:        27429186
+  Number of roots:          2
+  Maximum size of subspace: 36
+  Size of collapsed space:  8
+  Energy convergence:       1e-11
+  Residual convergence:     5e-08
+  Maximum iterations:       250
+
+=====================================================================================================
+Iter                    ⟨E⟩        max(ΔE)         max(r)   basis     time (s)                   note
+-----------------------------------------------------------------------------------------------------
+   0      -108.796618533397    +1.0887e+02    +9.6353e-06       4     411.4050                       
+   1      -108.796618533403    +7.6739e-12    +6.6378e-07       6     453.6904                       
+   2      -108.796618533403    +5.6843e-14    +9.5036e-08       8     446.5856                       
+   3      -108.796618533403    +5.6843e-14    +5.1866e-08      10     362.7070                       
+=====================================================================================================
+
+Davidson-Liu solver converged in 2115.240 seconds.
+
+
+===================================================================
+Selected CI Cycle 7
+===================================================================
+Algorithm: hbci
+  var_threshold = 1.220703125e-07
+  pt2_threshold = 1.220703125e-07
+Thread 0 processed 2 batches, found 0 new determinants in 34.8957 seconds (avg 17.4478 s/batch, 0.000000 dets/s)
+Thread 1 processed 2 batches, found 0 new determinants in 35.636 seconds (avg 17.818 s/batch, 0.000000 dets/s)
+Thread 2 processed 2 batches, found 0 new determinants in 48.1939 seconds (avg 24.0969 s/batch, 0.000000 dets/s)
+Thread 3 processed 2 batches, found 0 new determinants in 35.2925 seconds (avg 17.6462 s/batch, 0.000000 dets/s)
+
+Summary of selection:
+  Initial # of variational determinants:  27429186
+  Variational added:                      0
+  Total variational determinants:         27429186
+  Perturbatively included:                0
+  Selection time:                         70.708 s
+
+==============================================================
+Root            E (CI) [Eh]   S^2 (CI)   E (CI) + E (PT2) [Eh]
+--------------------------------------------------------------
+   0      -108.873063751225      0.000       -108.873063751225
+   1      -108.720173315580      0.000       -108.720173315580
+==============================================================
+
+Davidson-Liu solver configuration:
+  Size of the space:        27429186
+  Number of roots:          2
+  Maximum size of subspace: 36
+  Size of collapsed space:  8
+  Energy convergence:       1e-11
+  Residual convergence:     5e-08
+  Maximum iterations:       250
+
+=====================================================================================================
+Iter                    ⟨E⟩        max(ΔE)         max(r)   basis     time (s)                   note
+-----------------------------------------------------------------------------------------------------
+   0      -108.796618533410    +1.0887e+02    +2.6920e-08       4     491.7799                       
+=====================================================================================================
+
+Davidson-Liu solver converged in 896.220 seconds.
+
+
+===================================================================
+Selected CI Cycle 8
+===================================================================
+Algorithm: hbci
+  var_threshold = 1.220703125e-07
+  pt2_threshold = 1.220703125e-07
+Thread 0 processed 2 batches, found 0 new determinants in 32.7263 seconds (avg 16.3631 s/batch, 0.000000 dets/s)
+Thread 1 processed 2 batches, found 0 new determinants in 33.495 seconds (avg 16.7475 s/batch, 0.000000 dets/s)
+Thread 2 processed 2 batches, found 0 new determinants in 32.9788 seconds (avg 16.4894 s/batch, 0.000000 dets/s)
+Thread 3 processed 2 batches, found 0 new determinants in 33.4561 seconds (avg 16.728 s/batch, 0.000000 dets/s)
+
+Summary of selection:
+  Initial # of variational determinants:  27429186
+  Variational added:                      0
+  Total variational determinants:         27429186
+  Perturbatively included:                0
+  Selection time:                         53.978 s
+
+==============================================================
+Root            E (CI) [Eh]   S^2 (CI)   E (CI) + E (PT2) [Eh]
+--------------------------------------------------------------
+   0      -108.873063751230      0.000       -108.873063751230
+   1      -108.720173315590      0.000       -108.720173315590
+==============================================================
+
+Davidson-Liu solver configuration:
+  Size of the space:        27429186
+  Number of roots:          2
+  Maximum size of subspace: 36
+  Size of collapsed space:  8
+  Energy convergence:       1e-11
+  Residual convergence:     5e-08
+  Maximum iterations:       250
+
+=====================================================================================================
+Iter                    ⟨E⟩        max(ΔE)         max(r)   basis     time (s)                   note
+-----------------------------------------------------------------------------------------------------
+   0      -108.796618533408    +1.0887e+02    +2.4252e-08       4     460.0159                       
+=====================================================================================================
+
+Davidson-Liu solver converged in 887.518 seconds.
+
+
+===================================================================
+Selected CI Cycle 9
+===================================================================
+Algorithm: hbci
+  var_threshold = 1.220703125e-07
+  pt2_threshold = 1.220703125e-07
+Thread 0 processed 2 batches, found 0 new determinants in 34.2068 seconds (avg 17.1034 s/batch, 0.000000 dets/s)
+Thread 1 processed 2 batches, found 0 new determinants in 33.0454 seconds (avg 16.5227 s/batch, 0.000000 dets/s)
+Thread 2 processed 2 batches, found 0 new determinants in 33.8432 seconds (avg 16.9216 s/batch, 0.000000 dets/s)
+Thread 3 processed 2 batches, found 0 new determinants in 33.3796 seconds (avg 16.6898 s/batch, 0.000000 dets/s)
+
+Summary of selection:
+  Initial # of variational determinants:  27429186
+  Variational added:                      0
+  Total variational determinants:         27429186
+  Perturbatively included:                0
+  Selection time:                         51.915 s
+
+==============================================================
+Root            E (CI) [Eh]   S^2 (CI)   E (CI) + E (PT2) [Eh]
+--------------------------------------------------------------
+   0      -108.873063751230      0.000       -108.873063751230
+   1      -108.720173315586      0.000       -108.720173315586
+==============================================================
+
+Davidson-Liu solver configuration:
+  Size of the space:        27429186
+  Number of roots:          2
+  Maximum size of subspace: 36
+  Size of collapsed space:  8
+  Energy convergence:       1e-11
+  Residual convergence:     5e-08
+  Maximum iterations:       250
+
+=====================================================================================================
+Iter                    ⟨E⟩        max(ΔE)         max(r)   basis     time (s)                   note
+-----------------------------------------------------------------------------------------------------
+   0      -108.796618533410    +1.0887e+02    +2.3872e-08       4     518.1131                       
+=====================================================================================================
+
+Davidson-Liu solver converged in 949.160 seconds.
+
+
+===================================================================
+Selected CI Cycle 10
+===================================================================
+Algorithm: hbci
+  var_threshold = 1.220703125e-07
+  pt2_threshold = 1.220703125e-07
+Thread 0 processed 2 batches, found 0 new determinants in 33.5396 seconds (avg 16.7698 s/batch, 0.000000 dets/s)
+Thread 1 processed 2 batches, found 0 new determinants in 34.4722 seconds (avg 17.2361 s/batch, 0.000000 dets/s)
+Thread 2 processed 2 batches, found 0 new determinants in 34.0298 seconds (avg 17.0149 s/batch, 0.000000 dets/s)
+Thread 3 processed 2 batches, found 0 new determinants in 41.5488 seconds (avg 20.7744 s/batch, 0.000000 dets/s)
+
+Summary of selection:
+  Initial # of variational determinants:  27429186
+  Variational added:                      0
+  Total variational determinants:         27429186
+  Perturbatively included:                0
+  Selection time:                         61.332 s
+
+==============================================================
+Root            E (CI) [Eh]   S^2 (CI)   E (CI) + E (PT2) [Eh]
+--------------------------------------------------------------
+   0      -108.873063751235      0.000       -108.873063751235
+   1      -108.720173315586      0.000       -108.720173315586
+==============================================================
+
+Davidson-Liu solver configuration:
+  Size of the space:        27429186
+  Number of roots:          2
+  Maximum size of subspace: 36
+  Size of collapsed space:  8
+  Energy convergence:       1e-11
+  Residual convergence:     5e-08
+  Maximum iterations:       250
+
+=====================================================================================================
+Iter                    ⟨E⟩        max(ΔE)         max(r)   basis     time (s)                   note
+-----------------------------------------------------------------------------------------------------
+   0      -108.796618533412    +1.0887e+02    +2.3958e-08       4     408.9654                       
+=====================================================================================================
+
+Davidson-Liu solver converged in 796.751 seconds.
+
+
+===================================================================
+Selected CI Cycle 11
+===================================================================
+Algorithm: hbci
+  var_threshold = 1.220703125e-07
+  pt2_threshold = 1.220703125e-07
+Thread 0 processed 2 batches, found 0 new determinants in 33.436 seconds (avg 16.718 s/batch, 0.000000 dets/s)
+Thread 1 processed 2 batches, found 0 new determinants in 33.608 seconds (avg 16.804 s/batch, 0.000000 dets/s)
+Thread 2 processed 2 batches, found 0 new determinants in 34.27 seconds (avg 17.135 s/batch, 0.000000 dets/s)
+Thread 3 processed 2 batches, found 0 new determinants in 33.4715 seconds (avg 16.7357 s/batch, 0.000000 dets/s)
+
+Summary of selection:
+  Initial # of variational determinants:  27429186
+  Variational added:                      0
+  Total variational determinants:         27429186
+  Perturbatively included:                0
+  Selection time:                         53.627 s
+
+==============================================================
+Root            E (CI) [Eh]   S^2 (CI)   E (CI) + E (PT2) [Eh]
+--------------------------------------------------------------
+   0      -108.873063751235      0.000       -108.873063751235
+   1      -108.720173315588      0.000       -108.720173315588
+==============================================================
+
+Davidson-Liu solver configuration:
+  Size of the space:        27429186
+  Number of roots:          2
+  Maximum size of subspace: 36
+  Size of collapsed space:  8
+  Energy convergence:       1e-11
+  Residual convergence:     5e-08
+  Maximum iterations:       250
+
+=====================================================================================================
+Iter                    ⟨E⟩        max(ΔE)         max(r)   basis     time (s)                   note
+-----------------------------------------------------------------------------------------------------
+   0      -108.796618533412    +1.0887e+02    +2.3874e-08       4     412.9531                       
+=====================================================================================================
+
+Davidson-Liu solver converged in 803.072 seconds.
+
+
+===================================================================
+Selected CI Cycle 12
+===================================================================
+Algorithm: hbci
+  var_threshold = 1.220703125e-07
+  pt2_threshold = 1.220703125e-07
+Thread 0 processed 2 batches, found 0 new determinants in 33.2152 seconds (avg 16.6076 s/batch, 0.000000 dets/s)
+Thread 1 processed 2 batches, found 0 new determinants in 33.9126 seconds (avg 16.9563 s/batch, 0.000000 dets/s)
+Thread 2 processed 2 batches, found 0 new determinants in 33.4495 seconds (avg 16.7248 s/batch, 0.000000 dets/s)
+Thread 3 processed 2 batches, found 0 new determinants in 33.8871 seconds (avg 16.9435 s/batch, 0.000000 dets/s)
+
+Summary of selection:
+  Initial # of variational determinants:  27429186
+  Variational added:                      0
+  Total variational determinants:         27429186
+  Perturbatively included:                0
+  Selection time:                         53.244 s
+
+==============================================================
+Root            E (CI) [Eh]   S^2 (CI)   E (CI) + E (PT2) [Eh]
+--------------------------------------------------------------
+   0      -108.873063751234      0.000       -108.873063751234
+   1      -108.720173315590      0.000       -108.720173315590
+==============================================================
+
+Davidson-Liu solver configuration:
+  Size of the space:        27429186
+  Number of roots:          2
+  Maximum size of subspace: 36
+  Size of collapsed space:  8
+  Energy convergence:       1e-11
+  Residual convergence:     5e-08
+  Maximum iterations:       250
+
+=====================================================================================================
+Iter                    ⟨E⟩        max(ΔE)         max(r)   basis     time (s)                   note
+-----------------------------------------------------------------------------------------------------
+   0      -108.796618533405    +1.0887e+02    +2.3983e-08       4     422.8990                       
+=====================================================================================================
+
+Davidson-Liu solver converged in 838.832 seconds.
+
+
+===================================================================
+Selected CI Cycle 13
+===================================================================
+Algorithm: hbci
+  var_threshold = 1.220703125e-07
+  pt2_threshold = 1.220703125e-07
+Thread 0 processed 2 batches, found 0 new determinants in 32.8009 seconds (avg 16.4004 s/batch, 0.000000 dets/s)
+Thread 1 processed 2 batches, found 0 new determinants in 33.6619 seconds (avg 16.8309 s/batch, 0.000000 dets/s)
+Thread 2 processed 2 batches, found 0 new determinants in 34.1702 seconds (avg 17.0851 s/batch, 0.000000 dets/s)
+Thread 3 processed 2 batches, found 0 new determinants in 33.7058 seconds (avg 16.8529 s/batch, 0.000000 dets/s)
+
+Summary of selection:
+  Initial # of variational determinants:  27429186
+  Variational added:                      0
+  Total variational determinants:         27429186
+  Perturbatively included:                0
+  Selection time:                         51.774 s
+
+==============================================================
+Root            E (CI) [Eh]   S^2 (CI)   E (CI) + E (PT2) [Eh]
+--------------------------------------------------------------
+   0      -108.873063751226      0.000       -108.873063751226
+   1      -108.720173315584      0.000       -108.720173315584
+==============================================================
+
+Davidson-Liu solver configuration:
+  Size of the space:        27429186
+  Number of roots:          2
+  Maximum size of subspace: 36
+  Size of collapsed space:  8
+  Energy convergence:       1e-11
+  Residual convergence:     5e-08
+  Maximum iterations:       250
+
+=====================================================================================================
+Iter                    ⟨E⟩        max(ΔE)         max(r)   basis     time (s)                   note
+-----------------------------------------------------------------------------------------------------
+   0      -108.796618533409    +1.0887e+02    +2.3817e-08       4     488.2666                       
+=====================================================================================================
+
+Davidson-Liu solver converged in 955.699 seconds.
+
+
+===================================================================
+Selected CI Cycle 14
+===================================================================
+Algorithm: hbci
+  var_threshold = 1.220703125e-07
+  pt2_threshold = 1.220703125e-07
+Thread 0 processed 2 batches, found 0 new determinants in 32.4387 seconds (avg 16.2194 s/batch, 0.000000 dets/s)
+Thread 1 processed 2 batches, found 0 new determinants in 33.5055 seconds (avg 16.7527 s/batch, 0.000000 dets/s)
+Thread 2 processed 2 batches, found 0 new determinants in 32.9009 seconds (avg 16.4505 s/batch, 0.000000 dets/s)
+Thread 3 processed 2 batches, found 0 new determinants in 33.9469 seconds (avg 16.9735 s/batch, 0.000000 dets/s)
+
+Summary of selection:
+  Initial # of variational determinants:  27429186
+  Variational added:                      0
+  Total variational determinants:         27429186
+  Perturbatively included:                0
+  Selection time:                         52.647 s
+
+==============================================================
+Root            E (CI) [Eh]   S^2 (CI)   E (CI) + E (PT2) [Eh]
+--------------------------------------------------------------
+   0      -108.873063751230      0.000       -108.873063751230
+   1      -108.720173315588      0.000       -108.720173315588
+==============================================================
+
+Davidson-Liu solver configuration:
+  Size of the space:        27429186
+  Number of roots:          2
+  Maximum size of subspace: 36
+  Size of collapsed space:  8
+  Energy convergence:       1e-11
+  Residual convergence:     5e-08
+  Maximum iterations:       250
+
+=====================================================================================================
+Iter                    ⟨E⟩        max(ΔE)         max(r)   basis     time (s)                   note
+-----------------------------------------------------------------------------------------------------
+   0      -108.796618533408    +1.0887e+02    +2.3846e-08       4     400.0531                       
+=====================================================================================================
+
+Davidson-Liu solver converged in 874.806 seconds.
+
+
+===================================================================
+Selected CI Cycle 15
+===================================================================
+Algorithm: hbci
+  var_threshold = 1.220703125e-07
+  pt2_threshold = 1.220703125e-07
+Thread 0 processed 2 batches, found 0 new determinants in 32.8828 seconds (avg 16.4414 s/batch, 0.000000 dets/s)
+Thread 1 processed 2 batches, found 0 new determinants in 33.591 seconds (avg 16.7955 s/batch, 0.000000 dets/s)
+Thread 2 processed 2 batches, found 0 new determinants in 33.2389 seconds (avg 16.6195 s/batch, 0.000000 dets/s)
+Thread 3 processed 2 batches, found 0 new determinants in 33.7921 seconds (avg 16.8961 s/batch, 0.000000 dets/s)
+
+Summary of selection:
+  Initial # of variational determinants:  27429186
+  Variational added:                      0
+  Total variational determinants:         27429186
+  Perturbatively included:                0
+  Selection time:                         51.617 s
+
+==============================================================
+Root            E (CI) [Eh]   S^2 (CI)   E (CI) + E (PT2) [Eh]
+--------------------------------------------------------------
+   0      -108.873063751227      0.000       -108.873063751227
+   1      -108.720173315589      0.000       -108.720173315589
+==============================================================
+
+Davidson-Liu solver configuration:
+  Size of the space:        27429186
+  Number of roots:          2
+  Maximum size of subspace: 36
+  Size of collapsed space:  8
+  Energy convergence:       1e-11
+  Residual convergence:     5e-08
+  Maximum iterations:       250
+
+=====================================================================================================
+Iter                    ⟨E⟩        max(ΔE)         max(r)   basis     time (s)                   note
+-----------------------------------------------------------------------------------------------------
+   0      -108.796618533410    +1.0887e+02    +2.3813e-08       4     438.4321                       
+=====================================================================================================
+
+Davidson-Liu solver converged in 872.685 seconds.
+
+
+===================================================================
+Selected CI Cycle 16
+===================================================================
+Algorithm: hbci
+  var_threshold = 1.220703125e-07
+  pt2_threshold = 1.220703125e-07
+Thread 0 processed 2 batches, found 0 new determinants in 32.4382 seconds (avg 16.2191 s/batch, 0.000000 dets/s)
+Thread 1 processed 2 batches, found 0 new determinants in 33.3565 seconds (avg 16.6782 s/batch, 0.000000 dets/s)
+Thread 2 processed 2 batches, found 0 new determinants in 33.095 seconds (avg 16.5475 s/batch, 0.000000 dets/s)
+Thread 3 processed 2 batches, found 0 new determinants in 33.9699 seconds (avg 16.9849 s/batch, 0.000000 dets/s)
+
+Summary of selection:
+  Initial # of variational determinants:  27429186
+  Variational added:                      0
+  Total variational determinants:         27429186
+  Perturbatively included:                0
+  Selection time:                         51.842 s
+
+==============================================================
+Root            E (CI) [Eh]   S^2 (CI)   E (CI) + E (PT2) [Eh]
+--------------------------------------------------------------
+   0      -108.873063751228      0.000       -108.873063751228
+   1      -108.720173315591      0.000       -108.720173315591
+==============================================================
+
+Davidson-Liu solver configuration:
+  Size of the space:        27429186
+  Number of roots:          2
+  Maximum size of subspace: 36
+  Size of collapsed space:  8
+  Energy convergence:       1e-11
+  Residual convergence:     5e-08
+  Maximum iterations:       250
+
+=====================================================================================================
+Iter                    ⟨E⟩        max(ΔE)         max(r)   basis     time (s)                   note
+-----------------------------------------------------------------------------------------------------
+   0      -108.796618533408    +1.0887e+02    +2.3766e-08       4     444.3386                       
+=====================================================================================================
+
+Davidson-Liu solver converged in 889.148 seconds.
+
+
+===================================================================
+Selected CI Cycle 17
+===================================================================
+Algorithm: hbci
+  var_threshold = 1.220703125e-07
+  pt2_threshold = 1.220703125e-07
+Thread 0 processed 2 batches, found 0 new determinants in 33.3731 seconds (avg 16.6866 s/batch, 0.000000 dets/s)
+Thread 1 processed 2 batches, found 0 new determinants in 34.0785 seconds (avg 17.0393 s/batch, 0.000000 dets/s)
+Thread 2 processed 2 batches, found 0 new determinants in 34.1535 seconds (avg 17.0768 s/batch, 0.000000 dets/s)
+Thread 3 processed 2 batches, found 0 new determinants in 34.5954 seconds (avg 17.2977 s/batch, 0.000000 dets/s)
+
+Summary of selection:
+  Initial # of variational determinants:  27429186
+  Variational added:                      0
+  Total variational determinants:         27429186
+  Perturbatively included:                0
+  Selection time:                         52.145 s
+
+==============================================================
+Root            E (CI) [Eh]   S^2 (CI)   E (CI) + E (PT2) [Eh]
+--------------------------------------------------------------
+   0      -108.873063751226      0.000       -108.873063751226
+   1      -108.720173315589      0.000       -108.720173315589
+==============================================================
+
+Davidson-Liu solver configuration:
+  Size of the space:        27429186
+  Number of roots:          2
+  Maximum size of subspace: 36
+  Size of collapsed space:  8
+  Energy convergence:       1e-11
+  Residual convergence:     5e-08
+  Maximum iterations:       250
+
+=====================================================================================================
+Iter                    ⟨E⟩        max(ΔE)         max(r)   basis     time (s)                   note
+-----------------------------------------------------------------------------------------------------
+   0      -108.796618533411    +1.0887e+02    +2.3784e-08       4     464.3699                       
+=====================================================================================================
+
+Davidson-Liu solver converged in 885.465 seconds.
+
+
+===================================================================
+Selected CI Cycle 18
+===================================================================
+Algorithm: hbci
+  var_threshold = 1.220703125e-07
+  pt2_threshold = 1.220703125e-07
+Thread 0 processed 2 batches, found 0 new determinants in 33.6088 seconds (avg 16.8044 s/batch, 0.000000 dets/s)
+Thread 1 processed 2 batches, found 0 new determinants in 34.5792 seconds (avg 17.2896 s/batch, 0.000000 dets/s)
+Thread 2 processed 2 batches, found 0 new determinants in 34.9997 seconds (avg 17.4999 s/batch, 0.000000 dets/s)
+Thread 3 processed 2 batches, found 0 new determinants in 48.2211 seconds (avg 24.1106 s/batch, 0.000000 dets/s)
+
+Summary of selection:
+  Initial # of variational determinants:  27429186
+  Variational added:                      0
+  Total variational determinants:         27429186
+  Perturbatively included:                0
+  Selection time:                         66.167 s
+
+==============================================================
+Root            E (CI) [Eh]   S^2 (CI)   E (CI) + E (PT2) [Eh]
+--------------------------------------------------------------
+   0      -108.873063751230      0.000       -108.873063751230
+   1      -108.720173315591      0.000       -108.720173315591
+==============================================================
+
+Davidson-Liu solver configuration:
+  Size of the space:        27429186
+  Number of roots:          2
+  Maximum size of subspace: 36
+  Size of collapsed space:  8
+  Energy convergence:       1e-11
+  Residual convergence:     5e-08
+  Maximum iterations:       250
+
+=====================================================================================================
+Iter                    ⟨E⟩        max(ΔE)         max(r)   basis     time (s)                   note
+-----------------------------------------------------------------------------------------------------
+   0      -108.796618533411    +1.0887e+02    +2.3778e-08       4     512.2127                       
+=====================================================================================================
+
+Davidson-Liu solver converged in 1014.071 seconds.
+
+
+===================================================================
+Selected CI Cycle 19
+===================================================================
+Algorithm: hbci
+  var_threshold = 1.220703125e-07
+  pt2_threshold = 1.220703125e-07
+Thread 0 processed 2 batches, found 0 new determinants in 32.5493 seconds (avg 16.2746 s/batch, 0.000000 dets/s)
+Thread 1 processed 2 batches, found 0 new determinants in 33.5996 seconds (avg 16.7998 s/batch, 0.000000 dets/s)
+Thread 2 processed 2 batches, found 0 new determinants in 36.3722 seconds (avg 18.1861 s/batch, 0.000000 dets/s)
+Thread 3 processed 2 batches, found 0 new determinants in 35.3801 seconds (avg 17.69 s/batch, 0.000000 dets/s)
+
+Summary of selection:
+  Initial # of variational determinants:  27429186
+  Variational added:                      0
+  Total variational determinants:         27429186
+  Perturbatively included:                0
+  Selection time:                         54.209 s
+
+==============================================================
+Root            E (CI) [Eh]   S^2 (CI)   E (CI) + E (PT2) [Eh]
+--------------------------------------------------------------
+   0      -108.873063751230      0.000       -108.873063751230
+   1      -108.720173315593      0.000       -108.720173315593
+==============================================================
+
+Davidson-Liu solver configuration:
+  Size of the space:        27429186
+  Number of roots:          2
+  Maximum size of subspace: 36
+  Size of collapsed space:  8
+  Energy convergence:       1e-11
+  Residual convergence:     5e-08
+  Maximum iterations:       250
+
+=====================================================================================================
+Iter                    ⟨E⟩        max(ΔE)         max(r)   basis     time (s)                   note
+-----------------------------------------------------------------------------------------------------
+   0      -108.796618533412    +1.0887e+02    +2.3806e-08       4     531.8312                       
+=====================================================================================================
+
+Davidson-Liu solver converged in 1105.988 seconds.
+
+
+===================================================================
+Selected CI Cycle 20
+===================================================================
+Algorithm: hbci
+  var_threshold = 1.220703125e-07
+  pt2_threshold = 1.220703125e-07
+Thread 0 processed 2 batches, found 0 new determinants in 33.0395 seconds (avg 16.5198 s/batch, 0.000000 dets/s)
+Thread 1 processed 2 batches, found 0 new determinants in 32.9027 seconds (avg 16.4514 s/batch, 0.000000 dets/s)
+Thread 2 processed 2 batches, found 0 new determinants in 33.6272 seconds (avg 16.8136 s/batch, 0.000000 dets/s)
+Thread 3 processed 2 batches, found 0 new determinants in 33.4337 seconds (avg 16.7169 s/batch, 0.000000 dets/s)
+
+Summary of selection:
+  Initial # of variational determinants:  27429186
+  Variational added:                      0
+  Total variational determinants:         27429186
+  Perturbatively included:                0
+  Selection time:                         53.752 s
+
+==============================================================
+Root            E (CI) [Eh]   S^2 (CI)   E (CI) + E (PT2) [Eh]
+--------------------------------------------------------------
+   0      -108.873063751230      0.000       -108.873063751230
+   1      -108.720173315594      0.000       -108.720173315594
+==============================================================
+
+Davidson-Liu solver configuration:
+  Size of the space:        27429186
+  Number of roots:          2
+  Maximum size of subspace: 36
+  Size of collapsed space:  8
+  Energy convergence:       1e-11
+  Residual convergence:     5e-08
+  Maximum iterations:       250
+
+=====================================================================================================
+Iter                    ⟨E⟩        max(ΔE)         max(r)   basis     time (s)                   note
+-----------------------------------------------------------------------------------------------------
+   0      -108.796618533411    +1.0887e+02    +2.3810e-08       4     603.4022                       
+=====================================================================================================
+
+Davidson-Liu solver converged in 1150.566 seconds.
+
+
+===================================================================
+Selected CI Cycle 21
+===================================================================
+Algorithm: hbci
+  var_threshold = 1.220703125e-07
+  pt2_threshold = 1.220703125e-07
+Thread 0 processed 2 batches, found 0 new determinants in 32.846 seconds (avg 16.423 s/batch, 0.000000 dets/s)
+Thread 1 processed 2 batches, found 0 new determinants in 33.0004 seconds (avg 16.5002 s/batch, 0.000000 dets/s)
+Thread 2 processed 2 batches, found 0 new determinants in 33.556 seconds (avg 16.778 s/batch, 0.000000 dets/s)
+Thread 3 processed 2 batches, found 0 new determinants in 39.9719 seconds (avg 19.9859 s/batch, 0.000000 dets/s)
+
+Summary of selection:
+  Initial # of variational determinants:  27429186
+  Variational added:                      0
+  Total variational determinants:         27429186
+  Perturbatively included:                0
+  Selection time:                         58.419 s
+
+==============================================================
+Root            E (CI) [Eh]   S^2 (CI)   E (CI) + E (PT2) [Eh]
+--------------------------------------------------------------
+   0      -108.873063751231      0.000       -108.873063751231
+   1      -108.720173315591      0.000       -108.720173315591
+==============================================================
+
+Davidson-Liu solver configuration:
+  Size of the space:        27429186
+  Number of roots:          2
+  Maximum size of subspace: 36
+  Size of collapsed space:  8
+  Energy convergence:       1e-11
+  Residual convergence:     5e-08
+  Maximum iterations:       250
+
+=====================================================================================================
+Iter                    ⟨E⟩        max(ΔE)         max(r)   basis     time (s)                   note
+-----------------------------------------------------------------------------------------------------
+   0      -108.796618533410    +1.0887e+02    +2.3854e-08       4     498.7593                       
+=====================================================================================================
+
+Davidson-Liu solver converged in 1046.951 seconds.
+
+
+===================================================================
+Selected CI Cycle 22
+===================================================================
+Algorithm: hbci
+  var_threshold = 1.220703125e-07
+  pt2_threshold = 1.220703125e-07
+Thread 0 processed 2 batches, found 0 new determinants in 33.3148 seconds (avg 16.6574 s/batch, 0.000000 dets/s)
+Thread 1 processed 2 batches, found 0 new determinants in 34.3738 seconds (avg 17.1869 s/batch, 0.000000 dets/s)
+Thread 2 processed 2 batches, found 0 new determinants in 35.0177 seconds (avg 17.5088 s/batch, 0.000000 dets/s)
+Thread 3 processed 2 batches, found 0 new determinants in 35.8326 seconds (avg 17.9163 s/batch, 0.000000 dets/s)
+
+Summary of selection:
+  Initial # of variational determinants:  27429186
+  Variational added:                      0
+  Total variational determinants:         27429186
+  Perturbatively included:                0
+  Selection time:                         53.870 s
+
+==============================================================
+Root            E (CI) [Eh]   S^2 (CI)   E (CI) + E (PT2) [Eh]
+--------------------------------------------------------------
+   0      -108.873063751234      0.000       -108.873063751234
+   1      -108.720173315586      0.000       -108.720173315586
+==============================================================
+
+Davidson-Liu solver configuration:
+  Size of the space:        27429186
+  Number of roots:          2
+  Maximum size of subspace: 36
+  Size of collapsed space:  8
+  Energy convergence:       1e-11
+  Residual convergence:     5e-08
+  Maximum iterations:       250
+
+=====================================================================================================
+Iter                    ⟨E⟩        max(ΔE)         max(r)   basis     time (s)                   note
+-----------------------------------------------------------------------------------------------------
+   0      -108.796618533410    +1.0887e+02    +2.3879e-08       4     524.2374                       
+=====================================================================================================
+
+Davidson-Liu solver converged in 1076.583 seconds.
+
+
+===================================================================
+Selected CI Cycle 23
+===================================================================
+Algorithm: hbci
+  var_threshold = 1.220703125e-07
+  pt2_threshold = 1.220703125e-07
+Thread 0 processed 2 batches, found 0 new determinants in 35.4999 seconds (avg 17.75 s/batch, 0.000000 dets/s)
+Thread 1 processed 2 batches, found 0 new determinants in 32.8988 seconds (avg 16.4494 s/batch, 0.000000 dets/s)
+Thread 2 processed 2 batches, found 0 new determinants in 34.5745 seconds (avg 17.2873 s/batch, 0.000000 dets/s)
+Thread 3 processed 2 batches, found 0 new determinants in 33.7475 seconds (avg 16.8737 s/batch, 0.000000 dets/s)
+
+Summary of selection:
+  Initial # of variational determinants:  27429186
+  Variational added:                      0
+  Total variational determinants:         27429186
+  Perturbatively included:                0
+  Selection time:                         52.920 s
+
+==============================================================
+Root            E (CI) [Eh]   S^2 (CI)   E (CI) + E (PT2) [Eh]
+--------------------------------------------------------------
+   0      -108.873063751232      0.000       -108.873063751232
+   1      -108.720173315587      0.000       -108.720173315587
+==============================================================
+
+Davidson-Liu solver configuration:
+  Size of the space:        27429186
+  Number of roots:          2
+  Maximum size of subspace: 36
+  Size of collapsed space:  8
+  Energy convergence:       1e-11
+  Residual convergence:     5e-08
+  Maximum iterations:       250
+
+=====================================================================================================
+Iter                    ⟨E⟩        max(ΔE)         max(r)   basis     time (s)                   note
+-----------------------------------------------------------------------------------------------------
+   0      -108.796618533410    +1.0887e+02    +2.3876e-08       4     574.5017                       
+=====================================================================================================
+
+Davidson-Liu solver converged in 1107.299 seconds.
+
+Selected CI converged in 23 cycles.
+
+===================================================================
+Final Selected CI Cycle
+===================================================================
+Algorithm: hbci
+  var_threshold = 1.220703125e-07
+  pt2_threshold = 1.220703125e-07
+Thread 0 processed 2 batches, found 0 new determinants in 33.2542 seconds (avg 16.6271 s/batch, 0.000000 dets/s)
+Thread 1 processed 2 batches, found 0 new determinants in 34.1483 seconds (avg 17.0741 s/batch, 0.000000 dets/s)
+Thread 2 processed 2 batches, found 0 new determinants in 33.3437 seconds (avg 16.6719 s/batch, 0.000000 dets/s)
+Thread 3 processed 2 batches, found 0 new determinants in 34.4474 seconds (avg 17.2237 s/batch, 0.000000 dets/s)
+
+Summary of selection:
+  Variational added:     0
+  Perturbative included: 0
+  Total determinants:    27429186
+  Selection time:        51.959 s
+
+=====================================================================================
+Root           E (var) [Eh]   S^2 (var)          E (var') [Eh]      E (var'+PT2) [Eh]
+-------------------------------------------------------------------------------------
+   0      -108.873063751232       0.000      -108.873063751232      -108.873063751232
+   1      -108.720173315587       0.000      -108.720173315587      -108.720173315587
+=====================================================================================
+Thread 0 processed 2 batches, found 0 new determinants in 9.88039 seconds (avg 4.9402 s/batch, 0.000000 dets/s)
+Thread 1 processed 2 batches, found 0 new determinants in 10.0521 seconds (avg 5.02605 s/batch, 0.000000 dets/s)
+Thread 2 processed 2 batches, found 0 new determinants in 18.6909 seconds (avg 9.34544 s/batch, 0.000000 dets/s)
+Thread 3 processed 2 batches, found 0 new determinants in 14.6742 seconds (avg 7.3371 s/batch, 0.000000 dets/s)
+Thread 0 processed 2 batches, found 0 new determinants in 14.45 seconds (avg 7.22498 s/batch, 0.000000 dets/s)
+Thread 1 processed 2 batches, found 0 new determinants in 14.9758 seconds (avg 7.48788 s/batch, 0.000000 dets/s)
+Thread 2 processed 2 batches, found 0 new determinants in 26.4543 seconds (avg 13.2272 s/batch, 0.000000 dets/s)
+Thread 3 processed 2 batches, found 0 new determinants in 21.2545 seconds (avg 10.6272 s/batch, 0.000000 dets/s)
+Finished singlet-Ag-1.2207031e-07.json 27429186 [-108.87306375123248, -108.72017331558666] [6.97362747600401e-10, 1.116302100249829e-09]
